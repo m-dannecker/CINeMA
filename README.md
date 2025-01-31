@@ -1,2 +1,2 @@
 # CINeMA
-CINeMA: Conditional Implicit Neural Multi-Modal Atlas for a Spatio-Temporal Representation of the Developing Brain
+CINeMA: **C**onditional **I**mplicit **Ne**ural **M**ulti-Modal **A**tlas for a Spatio-Temporal Representation of the Developing Brain
