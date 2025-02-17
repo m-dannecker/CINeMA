@@ -1,0 +1,13 @@
+dhcp_fetal:
+  subject_ids:
+    train:
+        - sub-CC00050XX01_ses-10000
+        # list all sub ids
+    val:
+        - sub-CC00883XX18_ses-1821
+        # ...
+    test:
+        - sub-CC00862XX13_ses-41210
+
+dhcp_neo:
+    # ...

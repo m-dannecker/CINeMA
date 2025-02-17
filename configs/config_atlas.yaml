@@ -1,0 +1,109 @@
+#root_dir: /data_ssd/users/danneckm/PythonProjects/ImplicitAtlas/
+root_dir: '' # /vol/miltank/users/danneckm/PythonProjects/ImplicitAtlas
+#root_dir: /scratch/mdannecker/Projects/ImplicitAtlas
+
+logging: True
+log_dir: Logging #/data_ssd/users/danneckm/PythonProjects/ImplicitAtlas/Logging/
+output_dir: Logging/Reconstructions
+wandb_entity: m-dannecker
+project_name: ImplicitAtlas
+
+device: cuda
+device_dataset: cpu
+#seeds: [42, 43, 44, 45, 46]
+seeds: [42]
+amp: True
+compile: False
+
+dataset_name: dhcp_fetal # dhcp_neo_term_mono #dhcp_neo_preterm_mm # dhcp_neo_mono # dhcp_neo, dhcp_fetal, dhcp_combined, feta, marsfet
+test_time: False
+seg_optim: False
+sample_as_mm: False # sample only subs that have multi-modal data even if mono case is runnuing (for fair evaluation in ablation)
+T1_optim: False
+T2_optim: False
+harmonize_labels: True
+
+sampling_strategy: uniform_fillup # uniform, uniform_fillup
+spacing_rec: [1.0, 1.0, 1.0]
+spacing_atlas: [1.0, 1.0, 1.0]
+#spacing_atlas: [0.75, 0.75, 0.75]
+scale_factor: 1.0
+modulated_layers: [1, 3, 5]
+
+# size needs to be normalized in relation to brain volume size
+mode: CINA
+save_imgs:
+  train: False
+  val: True
+generate_cond_atlas: True
+save_cond_atlas: True
+save_certainty_maps: False
+mask_reconstruction: True
+save_model: True
+best_target_metric: 0.0
+load_model: # accNew_marsfet_nnUNet_06122024_122836_549 # dhcp_fetal_18122024_134138_810_42 # dhcp_neo_11122024_135505_loc_100 # VM_marsfet_nnUNet_03122024_17400621 # marsfet_nnUNet_02122024_21171497 # marsfet_nnUNet_02122024_13471717 # CINA_dhcp_neo_26112024_154537 # CINA_dhcp_neo_26112024_131625 # CINA_dhcp_neo_26112024_120319 # CINA_dhcp_neo_25112024_123348 # CINA_dhcp_neo_20112024_113235 # CINA_dhcp_neo_25112024_123348 # CINA_dhcp_neo_20112024_113235 # CINA_dhcp_neo_20112024_132352 # CINA_dhcp_neo_20112024_113235 # CINA_dhcp_neo_20112024_132352 # CINA_dhcp_neo_20112024_113235 # CINA_dhcp_neo_19112024_175109 # CINA_dhcp_neo_21112024_162920 # CINA_dhcp_neo_21112024_103748 # CINA_dhcp_fetal_20112024_163352 # CINA_dhcp_fetal_20112024_163448 # CINA_dhcp_neo_19112024_112936 # CINA_dhcp_neo_19112024_164428 # CINA_dhcp_neo_19112024_175109 # CINA_marsfet_11112024_153458 # CINA_dhcp_neo_05112024_170032 # CINA_dhcp_fetal_30102024_155057 # CINA_dhcp_fetal_30102024_144730 # CINA_dhcp_fetal_30102024_102135 # CINA_dhcp_fetal_25102024_104659 #CINA_dhcp_fetal_25102024_095554 # CINA_dhcp_neo_19092024_185617 # CINA_dhcp_neo_19092024_185617 # CINA_dhcp_neo_07092024_234212 # CINA_dhcp_neo_04092024_005408 # CINA_dhcp_neo_dhcp_fetal_17062024_144747 # CINA_dhcp_neo_11062024_171729 # CINA_dhcp_neo_12062024_120203 # CINA_dhcp_neo_05062024_222703 #BestDHCP_DeepSDF_01032024_080810
+
+# Network Params
+in_dim: 3
+latent_dim: [256, 3, 3, 3]
+trafo_dim:
+  train: 6  # 0 = off, 6 = rigid, 9 = rigid + scaling
+  val: 6
+hidden_size: 1024
+num_hidden_layers: 5
+first_omega: 30
+hidden_omega: 30
+# HEAD
+head_hidden_size: 64
+head_num_layers: 1
+head_omega: 30
+
+lat_l2_weight: 0.0
+trafo_weight: 0.0
+
+segmentation: True
+soft_label: [2]
+seg_weight: 1.0
+
+wd_latent:
+  train: 0.0
+  val: 0.0
+
+lr:
+  train: 1.0e-4
+  val: 0.0
+lr_trafo:
+  train: 7.5e-3
+  val: 7.5e-3
+lr_latent:
+  train: 5.0e-4
+  val: 5.0e-4
+lr_cond:
+  val: 5.0e-4
+
+s_gamma:
+  train: 0.80
+  val: 0.90
+loss_metric: l1
+contrastive: False
+contrastive_margin: 1.0
+contrastive_weight: 1.0
+
+# Training Setup
+batch_size:
+  train: 300
+  val: 200
+val_every: 1
+n_samples:
+  train: 25000
+  val: 25000
+epochs: 1
+val_epochs: 10
+val_init_by_mean: False
+
+# Post Processing
+age_step: 1 # generate atlases for every x age
+cond_scale: 0.05 # scale for condition latent
+cond_steps: 7 # take cond_steps steps in condition latent space
+l_vols: [-1, 0, 1] #[-6.0, -5.0, -4.0, -3.0, -2.0, -1.0, 0, 1.0, 2.0, 3.0, 4.0, 5.0]  # specify which volume states to generate atlases for (-1 is smallest volume, 1 is largest)
+gauss_sigma: 0.25  # sigma for age gaussian weighted mean latent for atlas generation
