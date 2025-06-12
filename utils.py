@@ -1,4 +1,5 @@
 import math
+import json
 from types import SimpleNamespace
 import ants
 import os
@@ -12,6 +13,13 @@ import matplotlib.pyplot as plt
 from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 from skimage.metrics import structural_similarity as ssim_metric
 import scipy.ndimage as ndi
+import torchio as tio
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 
 def dict_to_simplenamespace(d):
@@ -24,176 +32,76 @@ def dict_to_simplenamespace(d):
         return d
 
 
+class MaskSubjectTransform(tio.Transform):
+    """
+    A custom TorchIO transform that uses a segmentation image 
+    to mask the intensity images in a subject.
+    
+    This transform assumes:
+      - The segmentation image key is provided (e.g., 'SegEM9').
+      - All other modalities should be masked using this segmentation.
+        (Alternatively, you can specify a list of intensity keys.)
+    """
+    def __init__(self, segmentation_key, intensity_keys=None, **kwargs):
+        """
+        Args:
+            segmentation_key (str): The key for the segmentation image.
+            intensity_keys (list, optional): List of keys to apply the mask.
+                If None, all keys except segmentation_key are used.
+        """
+        super().__init__(**kwargs)
+        self.segmentation_key = segmentation_key
+        self.intensity_keys = intensity_keys
+
+    def apply_transform(self, subject):
+        # Retrieve the segmentation image and its data (assumed to be a LabelMap)
+        seg_image = subject[self.segmentation_key]
+        seg_data = seg_image.data  # shape: (1, X, Y, Z)
+        
+        # Identify which images to mask (all those not marked as segmentation)
+        if self.intensity_keys is None:
+            keys_to_mask = [k for k in subject.get_images_names() if k != self.segmentation_key]
+        else:
+            keys_to_mask = self.intensity_keys
+
+        # Apply masking on each designated intensity image.
+        # Here, as an example, we zero out values where the segmentation is zero.
+        # You can adjust this logic as needed.
+        for key in keys_to_mask:
+            image = subject[key]
+            image.data = image.data * (seg_data > 0)
+        
+        return subject
+
+
 class Criterion(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.n_classes = args['out_dim'][-1]-1  # number of classes for segmentation excluding background
-        self.sr_dims = sum(args['out_dim'][:-1])
-        self.criterion_sr = nn.MSELoss() if args['loss_metric'] == 'mse' else nn.L1Loss()
-        self.criterion_seg = nn.CrossEntropyLoss()
-        self.criterion_contrastive = CosineSimilarityContrastiveLoss(margin=args['contrastive_margin'])
+        self.tf_weight = args['optimizer']['tf_weight']
+        self.n_classes = args['inr_decoder']['out_dim'][-1]-1  # number of classes for segmentation excluding background
+        self.sr_dims = sum(args['inr_decoder']['out_dim'][:-1])
+        self.criterion_sr = nn.MSELoss() if args['optimizer']['loss_metric'] == 'mse' else nn.L1Loss()
+        self.ce_weights = torch.tensor(args['dataset']['class_weights'], dtype=torch.float32, device=args['device']) if args['dataset']['class_weights'] is not None else None
+        self.criterion_seg = nn.CrossEntropyLoss(weight=self.ce_weights)
 
-    def forward(self, output, target, lats, trafos, sr_weight=1.0, seg_weight=1.0, positive_pairs=None):
-        # if mm then mods are (T2, T1, Seg)
-        sr_dims_start = 0 if not self.args['T1_optim'] else 1   # we optimize on T1 only
-        sr_dims = self.sr_dims if not self.args['T2_optim'] else 1  # we optimize on T2 only
-        loss = {'seg': 0, 'sr': sr_weight * self.criterion_sr(output[..., sr_dims_start:sr_dims], target[..., sr_dims_start:sr_dims]),
-                'lat_reg': self.args['lat_l2_weight'] * torch.mean(lats ** 2) if self.args['lat_l2_weight'] > 0 else torch.tensor(0.0),
-                'contrastive': torch.tensor(0.0), 'trafo': torch.tensor(0.0), 'total': 0.0}
+    def forward(self, output, target, tfs, sr_weight=1.0, seg_weight=1.0):
+        loss = {'seg': torch.tensor(0.0), 
+                'sr': sr_weight * self.criterion_sr(output[..., :self.sr_dims], target[..., :self.sr_dims]),
+                'trafo': torch.tensor(0.0), 
+                'total': 0.0}
 
-        if self.args['segmentation']:
+        if seg_weight > 0:
             loss['seg'] = seg_weight * self.criterion_seg(output[..., self.sr_dims:], target[..., -1].to(torch.int64))
-        if positive_pairs is not None:
-            loss['contrastive'] = self.args['contrastive_weight'] * self.criterion_contrastive(lats, positive_pairs[0],
-                                                                                            positive_pairs[1])
-        if trafos is not None:
-            loss['trafo'] = self.args['trafo_weight'] * torch.mean(trafos ** 2)
-        loss['total'] = loss['sr'] + loss['seg'] + loss['lat_reg'] + loss['contrastive'] + loss['trafo']
+            
+        if tfs is not None:
+            loss['tf_rot'] = torch.mean(tfs[..., :3] ** 2)
+            loss['tf_trans'] = torch.mean(tfs[..., 3:6] ** 2)
+            loss['tf_scale'] = torch.mean(tfs[..., 6:9] ** 2) if tfs.shape[-1] == 9 else torch.tensor(0.0)
+            loss['tf'] = loss['tf_rot'] + loss['tf_trans'] + loss['tf_scale']
+
+        loss['total'] = loss['sr'] + seg_weight * loss['seg'] + self.tf_weight * loss['tf']
         return loss
-
-
-class CosineSimilarityContrastiveLoss(nn.Module):
-    def __init__(self, margin=0.5):
-        super(CosineSimilarityContrastiveLoss, self).__init__()
-        self.margin = margin
-
-    def forward(self, lats,  anchor, positive):
-        anchor = lats[anchor]
-        positive = lats[positive]
-        # Calculate the cosine similarity between anchor and positive samples
-        cosine_sim = F.cosine_similarity(anchor, positive, dim=-1)
-
-        # Calculate the loss as 1 minus the cosine similarity for positive pairs,
-        # and then apply a margin. The loss is zero when the cosine similarity is above the margin.
-        if self.margin == 1:
-            loss = -torch.log((cosine_sim + 1.0) / 2.0)
-        else:
-            loss = torch.relu(1 - cosine_sim - self.margin)  # Enforces similarity above margin
-
-        return loss.mean()
-
-
-def dice_score(predictions, targets, num_classes, bg_label, reduce=True):
-    dice_scores = []
-    for class_idx in range(1, num_classes):
-        if class_idx == bg_label:  # skip background
-            continue
-        pred_binary = (predictions == class_idx).to(torch.int)
-        target_binary = (targets == class_idx).to(torch.int)
-
-        intersection = torch.sum(pred_binary * target_binary)
-        total = torch.sum(pred_binary) + torch.sum(target_binary)
-
-        dice_score = (2. * intersection + 1e-6) / (total + 1e-6)  # Adding a small constant to avoid division by zero
-        dice_scores.append(dice_score)
-    dice = torch.stack(dice_scores).mean().item() if reduce else torch.stack(dice_scores)
-    return dice
-
-
-def compare2ref(args, modalities_rec, modalities_ref, aff_rec=None, aff_ref=None, mask=True, crop2bbox=True, normalize=True,
-                reg_type='Rigid', bg_label=4, num_classes=1, reduce=False):
-    num_mods = modalities_rec.shape[-1]
-    mytx = None
-    modalities_reg_np = []
-    modalities_ref_np = []
-    for i in range(num_mods):
-        mod = modalities_rec[..., i]
-        mod_ref = modalities_ref[i]
-        if isinstance(mod, torch.Tensor):
-            mod = mod.detach().cpu().numpy()
-        if isinstance(mod_ref, torch.Tensor):
-            mod_ref = mod_ref.cpu().numpy()
-        if not isinstance(mod, nib.Nifti1Image):
-            mod = nib.Nifti1Image(mod, aff_rec)
-        if not isinstance(mod_ref, nib.Nifti1Image):
-            mod_ref = nib.Nifti1Image(mod_ref, aff_ref)
-        if i == 0:
-            mod_reg, mytx = reg_imgs(mod, mod_ref, reg_type=reg_type, interpolator='linear')
-            nib.save(mod, os.path.join(args['output_path'], 'mod.nii.gz'))
-            nib.save(mod_ref, os.path.join(args['output_path'], 'mod_ref.nii.gz'))
-
-        elif i < num_mods-1:
-            mod_reg, _ = reg_imgs(mod, mod_ref, mytx, reg_type, interpolator='linear')
-        else:
-            mod_reg, _ = reg_imgs(mod, mod_ref, mytx, reg_type, interpolator='nearestNeighbor')
-        modalities_reg_np.append(mod_reg.get_fdata())
-        modalities_ref_np.append(mod_ref.get_fdata())
-    mask = modalities_ref_np[-1] > 0 if mask else None
-    _, bbox = get_non_zero_bbox(mask) if crop2bbox else (None, None)
-    mod_regs, psnrs, ssims, nccs, dices = [], [[] for _ in range(num_mods-1)], [[] for _ in range(num_mods-1)], [[] for _ in range(num_mods-1)], []
-    for i, (mod_reg_np, mod_ref_np) in enumerate(zip(modalities_reg_np, modalities_ref_np)):
-        if mask is not None:
-            mod_reg_np = mod_reg_np * mask
-            mod_ref_np = mod_ref_np * mask
-        if crop2bbox:
-            mod_reg_np_c = mod_reg_np[bbox[0][0]:bbox[1][0], bbox[0][1]:bbox[1][1], bbox[0][2]:bbox[1][2]]
-            mod_ref_np_c = mod_ref_np[bbox[0][0]:bbox[1][0], bbox[0][1]:bbox[1][1], bbox[0][2]:bbox[1][2]]
-        else:
-            mod_reg_np_c = mod_reg_np
-            mod_ref_np_c = mod_ref_np
-        if normalize and i < len(modalities_reg_np)-1:
-            mod_reg_np_c = (mod_reg_np_c - mod_reg_np_c.min()) / (mod_reg_np_c.max() - mod_reg_np_c.min())
-            mod_ref_np_c = (mod_ref_np_c - mod_ref_np_c.min()) / (mod_ref_np_c.max() - mod_ref_np_c.min())
-        if i < len(modalities_reg_np)-1:
-            psnrs[i].append(psnr_metric(mod_reg_np_c, mod_ref_np_c, data_range=1.0))
-            ssims[i].append(ssim_metric(mod_reg_np_c, mod_ref_np_c, data_range=1.0))
-            nccs[i].append(compute_ncc(mod_reg_np_c, mod_ref_np_c))
-        else:
-            if args['harmonize_labels']: # this is for comparison with Makropoulos et al. 2015 and Serag et al. 2012
-                mod_reg_np_c = harmonize_labels(mod_reg_np_c, args['dataset_name'])
-                mod_ref_np_c = harmonize_labels(mod_ref_np_c, args['dataset_name'])
-                num_classes = 8 if 'dhcp_neo' in args['dataset_name'] else 5
-                bg_label = 0
-
-            dices.append(dice_score(torch.from_numpy(mod_reg_np_c).to(torch.int),
-                                    torch.from_numpy(mod_ref_np_c).to(torch.int),
-                                    num_classes=num_classes, bg_label=bg_label, reduce=reduce))
-        mod_regs.append(mod_reg_np_c)
-    mod_regs = torch.from_numpy(np.stack(mod_regs, axis=-1))
-    new_aff = mod_reg.affine
-
-    # if mm then mods are (T2, T1, Seg)
-
-    return (mod_regs, new_aff, [np.mean(psnrs[i]) for i in range(len(psnrs))],
-            [np.mean(ssims[i]) for i in range(len(ssims))], [np.mean(nccs[i]) for i in range(len(nccs))], dices[0])
-
-
-def reg_imgs(mov, fixed, mytx=None, reg_type='Rigid', interpolator='linear'):
-    mov_ants = ants.from_nibabel(mov)
-    fixed_ants = ants.from_nibabel(fixed)
-    # normalize intensities
-    if interpolator == 'linear':
-        mov_ants = (mov_ants - mov_ants.min()) / (mov_ants.max() - mov_ants.min())
-        fixed_ants = (fixed_ants - fixed_ants.min()) / (fixed_ants.max() - fixed_ants.min())
-    if mytx is None and reg_type is not None: # first modality, hence we need to register
-        mytx = ants.registration(fixed=fixed_ants, moving=mov_ants, type_of_transform=reg_type)
-    if mytx is None: # no registration needed as we only need to resample
-        # resample moving image to fixed image space
-        mov_warped_ants = ants.resample_image_to_target(mov_ants, fixed_ants, interp_type=interpolator)
-    else: # apply the transformation if available
-        mov_warped_ants = ants.apply_transforms(fixed=fixed_ants, moving=mov_ants, transformlist=mytx['fwdtransforms'],
-                                                interpolator=interpolator)
-    mov_warped = ants.to_nibabel(mov_warped_ants)
-    return mov_warped, mytx
-
-
-def get_non_zero_bbox(img, dim=3):
-    non_zero_indices = np.array(np.where(img != 0))
-    min_indices = np.min(non_zero_indices, axis=1)
-    max_indices = np.max(non_zero_indices, axis=1)
-    if dim == 2:
-        img_cropped = img[min_indices[0]:max_indices[0], min_indices[1]:max_indices[1]]
-    else:
-        img_cropped = img[min_indices[0]:max_indices[0], min_indices[1]:max_indices[1], min_indices[2]:max_indices[2]]
-    return img_cropped, np.array([min_indices, max_indices])
-
-
-def create_coordinate_grid(shape, normed=True, device='cpu'):
-    img = torch.ones(shape.tolist(), dtype=torch.float32, device=device)
-    grid = torch.nonzero(img).float() - ((shape.to(device) - 1) / 2)
-    grid = (grid / (shape.to(device) - 1) * 2) if normed else grid
-    return grid
 
 
 def scale_affine(affine, new_spacing, bbox):
@@ -213,134 +121,6 @@ def compute_ncc(prediction, reference):
     denominator = np.sqrt(np.sum((prediction - mean_pred) ** 2) * np.sum((reference - mean_ref) ** 2))
     ncc = numerator / denominator
     return ncc.astype(np.float64)
-
-
-def get_surface_from_boundary(boundary, spacing, use_grad=False, iters=3):
-    # iterate over all non-zero elements in the boundary and check how many of the six direct neighbors are zero
-    # count the number of the zero neighbors
-    if use_grad:
-        # get largest connected component with value zero
-        lcc = ndi.label(boundary == 0)[0]
-        lcc_sizes = np.bincount(lcc.ravel())
-        lcc = lcc == np.argmax(lcc_sizes)
-        bndry = np.ones_like(boundary)
-        bndry[lcc] = 0
-        bndry = ndi.morphology.binary_closing(bndry, iterations=iters)
-
-        gradient = np.gradient(bndry.astype(int))
-        grad_norm = np.linalg.norm(gradient, axis=0)
-        non_zero_idcs = np.array(np.where(grad_norm != 0)).T
-        # plt.imshow(grad_norm[..., grad_norm.shape[-1]//2], cmap='gray')
-        # plt.show()
-    else:
-        non_zero_idcs = np.array(np.where(boundary != 0)).T
-
-    surface = 0
-    for idx in non_zero_idcs:
-        num_non_zero_neighbors = np.sum(boundary[idx[0]-1:idx[0]+2, idx[1]-1:idx[1]+2, idx[2]-1:idx[2]+2] != 0)
-        num_zero_neighbors = 27 - num_non_zero_neighbors
-        surface += num_zero_neighbors
-    return surface * np.prod(spacing)
-
-
-def seg2distance_map(img_np, spacing, c, sdf=False):
-    img = img_np == c
-    distance = ndi.distance_transform_edt(img, sampling=spacing) * img
-
-    if sdf:
-        img_inv = np.logical_not(img)
-        dist_outside = ndi.distance_transform_edt(img_inv, sampling=spacing)
-        distance -= dist_outside
-    return distance
-
-
-def save_atlas(atlas, affine, args, individually=False):
-    # atlas is of shape (conds, x, y, z, num_modalities, t) where conds is the conditional dimension
-    num_mods = len(args['modalities']['names'])
-    if isinstance(atlas, torch.Tensor):
-        atlas = atlas.detach().cpu().numpy()
-    for c in range(atlas.shape[0]):
-        for i in range(num_mods):
-            filename = (f'{args["modalities"]["names"][i]}_atlas_age={args["constraints"]["scan_age"][0]}'
-                        f'-{args["constraints"]["scan_age"][1]}_cond={c}.nii.gz')
-            if individually:
-                for j in range(atlas.shape[-1]):
-                    filename_ = filename.replace('.nii.gz', f'_t{j}.nii.gz')
-                    save_img(atlas[c, ..., i, j], affine=affine, output_path=args['output_path'], filename=filename_)
-            else:
-                save_img(atlas[c, ..., i, :], affine=affine, output_path=args['output_path'], filename=filename)
-            if i == num_mods-1 and args['save_certainty_maps']:
-                for j, l_name in enumerate(args['label_names'][1:], start=2):
-                    filename_ = filename.replace('Seg', 'CertaintyMaps/'+l_name)
-                    save_img(atlas[c, ..., i+j, :], affine=affine, output_path=args['output_path'], filename=filename_)
-    print('Atlas saved to {}'.format(args['output_path']))
-
-    if args['logging']:
-        if args['conditions']['birth_age']:
-            fig_vols = compute_volume_by_birth_age(args, atlas[:, :, :, :, len(args['modalities']['names'])+1:, :], # +1 don't pass background
-                                        spacing=np.array(args['spacing_atlas']),
-                                        label_names=args['label_names'][1:], scan_age_min_max=args['constraints']['scan_age'],
-                                        birth_age_min_max=args['constraints']['birth_age'])
-            wd.log({f"Volume By Birth Age": [wd.Image(fig_vols)]})
-            plt.close(fig_vols)
-
-        conds, x, y, z, rows, cols = atlas.shape  # rows num_mods + num_labels (soft labels)
-        rows = len(args['modalities']['names'])
-        for cond in range(conds):
-            fig, axs = plt.subplots(rows, cols, figsize=(cols * 3, rows * 5))
-            axs = axs.reshape(rows, cols)
-            for c in range(atlas.shape[-1]):
-                for r in range(rows):
-                    cmap = "gray" if r < rows-1 else "viridis"
-                    axs[r, c].imshow(np.flip(atlas[cond, :, :, z // 2, r, c].T), cmap=cmap)
-                    axs[r, c].axis('off')
-            fig.suptitle('Atlas scan_age: {}-{}'.format(args['constraints']['scan_age'][0], args['constraints']['scan_age'][1]))
-            plt.tight_layout()
-            wd.log({f"Atlas condition={cond}": [wd.Image(fig)]})
-            plt.close(fig)
-
-
-def compute_volume_by_birth_age(args, certainty_maps, spacing, label_names, scan_age_min_max, birth_age_min_max):
-    # certainty_maps is of shape (birth_age, x, y, z, n_labels, t)
-    # one plot per label
-    fig, axs = plt.subplots(math.ceil(len(label_names)/2), 2, figsize=(7, 14))
-    axs = axs.flatten()
-    for ln, label_name in enumerate(label_names):
-        volumes = {}
-        ba_arange = np.linspace(birth_age_min_max[0], birth_age_min_max[1], args['cond_steps'])
-        for ba, birth_age in enumerate(ba_arange):
-            volumes[birth_age] = []
-            sa_arange = np.arange(scan_age_min_max[0]+1, scan_age_min_max[1], args['age_step'])
-            for sa, scan_age in enumerate(sa_arange):
-                certainty_map = certainty_maps[ba, ..., ln, sa]
-                volumes[birth_age].append(np.sum(certainty_map) * np.prod(spacing))
-            # plot volume over scan_age for each birth_age
-            axs[ln].plot(sa_arange, volumes[birth_age], label=f'ba={birth_age}')
-        axs[ln].set_title(label_name)
-        axs[ln].set_xlabel('scan_age')
-        axs[ln].set_ylabel('volume')
-        axs[ln].legend(fontsize='small', loc='upper left')
-    plt.tight_layout()
-    return fig
-
-
-def compute_volumes(certainty_maps_np, spacings, label_names):
-    volumes = {}
-    for i, label_name in enumerate(label_names):
-        label_volume = np.sum(certainty_maps_np == i) * np.prod(spacings)
-        volumes[label_name] = label_volume
-    return volumes
-
-
-def save_img(img, affine, output_path, filename):
-    if img.dtype == 'int64' or img.dtype == 'int32':
-        img = img.astype(np.int16)
-    elif img.dtype == 'float64':
-        img = img.astype(np.float32)
-    full_path = os.path.join(output_path, filename)
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-    img_nii = nib.Nifti1Image(img, affine)
-    nib.save(img_nii, full_path)
 
 
 def embed2affine(embed):
@@ -403,3 +183,457 @@ def harmonize_labels(subject_seg, dataset):
     else:
         raise NotImplementedError("Atlas Type not implemented.")
     return subject_seg
+
+
+def to_device(x, device='cuda'):
+    if isinstance(x, torch.Tensor):
+        return x.to(device, non_blocking=True)
+    elif isinstance(x, (list, tuple)):
+        return type(x)(to_device(t) for t in x)
+    elif isinstance(x, dict):
+        return {k: to_device(v) for k, v in x.items()}
+    else:
+        return x  # Leave non-tensor data as is
+    
+
+def normalize_condition(args, condition_key, condition_values, cond_scale=None):
+    c_scale = args['atlas_gen']['cond_scale'] if cond_scale is None else cond_scale
+    c_min = args['dataset']['constraints'][condition_key]['min']
+    c_max = args['dataset']['constraints'][condition_key]['max']
+    cv = 2 * ((condition_values - c_min) / (c_max - c_min) - 0.5)
+    cv = cv * c_scale
+    return cv
+
+
+def generate_combinations(args_data, conditions, keys=None, idx=0, current=None, results=None):
+    if conditions is None: 
+        return [[]]
+    if keys is None:
+        keys = list(conditions.keys())
+    if current is None:
+        current = []
+    if results is None:
+        results = []
+
+    key = keys[idx]
+    values = conditions[key]['values']
+
+    for value in values:
+        if not conditions[key]['normed_values']:
+            value = normalize_condition(args_data, key, value)
+        else:
+            value = value * args_data['atlas_gen']['cond_scale']
+        next_current = current + [value]
+        if idx == len(keys) - 1:
+            results.append(next_current)
+        else:
+            generate_combinations(args_data, conditions, keys, idx + 1, next_current, results)
+
+    return results
+
+
+def generate_world_grid(args, normed=True, device='cpu'):
+    world_bbox = args['dataset']['world_bbox']
+    spacing = args['atlas_gen']['spacing']
+    x = torch.arange(0, world_bbox[0], spacing[0], device=device)
+    y = torch.arange(0, world_bbox[1], spacing[1], device=device)
+    z = torch.arange(0, world_bbox[2], spacing[2], device=device)
+    if normed:
+        # normalize to [-1, 1]
+        x = x / world_bbox[0] * 2 - 1
+        y = y / world_bbox[1] * 2 - 1
+        z = z / world_bbox[2] * 2 - 1
+    grid = torch.meshgrid(x, y, z, indexing='ij')
+    grid_shape = list(grid[0].shape)
+    grid_coords = torch.stack(grid, dim=-1).reshape(-1, 3)
+    affine = torch.diag(torch.tensor([spacing[0], spacing[1], spacing[2], 1.0], device=device))
+    return grid_coords, grid_shape, affine
+
+
+def save_atlas(args, atlas, affine, temp_steps, condition_vectors, epoch):
+    # atlas is of shape  (x, y, z, num_modalities, n_conds, t) where conds is the conditional dimension
+    x, y, z, num_mods, n_conds, t = atlas.shape
+    if isinstance(atlas, torch.Tensor):
+        try:
+            atlas = atlas.detach().cpu().numpy()
+        except:
+            atlas = atlas.numpy()
+    if isinstance(affine, torch.Tensor):
+        affine = affine.detach().cpu().numpy()
+    mod_labels = args['dataset']['modalities']
+    if args['save_certainty_maps']:
+        seg_labels = [f"CertaintyMaps/{label}" for label in args['dataset']['label_names']]
+        mod_labels = mod_labels + seg_labels
+    for c in range(n_conds):
+        for i in range(len(mod_labels)):
+            filename = (f'{mod_labels[i]}_ga={temp_steps[0]}-{temp_steps[-1]}_cond={c}_ep={epoch}.nii.gz')
+            save_img(atlas[..., i, c, :], affine=affine, output_path=args['output_dir'], filename=filename)
+    print('Atlas saved to {}'.format(args['output_dir']))
+
+    # if args['logging']:
+    #     rows = num_mods
+    #     columns = t
+    #     for cond in range(n_conds):
+    #         fig, axs = plt.subplots(rows, columns, figsize=(columns * 3, rows * 5))
+    #         axs = axs.reshape(rows, columns)
+    #         for c in range(columns):
+    #             for r in range(rows):
+    #                 cmap = "gray" if r < rows-1 else "viridis"
+    #                 axs[r, c].imshow(np.flip(atlas[..., i, c, :].T), cmap=cmap)
+    #                 axs[r, c].axis('off')
+    #         fig.suptitle('Atlas scan_age: {}-{}'.format(temp_steps[0], temp_steps[-1]))
+    #         plt.tight_layout()
+    #         wd.log({f"Atlas condition={cond}": [wd.Image(fig)]})
+    #         plt.close(fig)
+
+
+def typecheck_img_affine(img, affine):
+    if isinstance(img, torch.Tensor):
+        img = img.detach().cpu().numpy()
+    if isinstance(affine, torch.Tensor):
+        affine = affine.detach().cpu().numpy()
+    if img.dtype == 'int64' or img.dtype == 'int32':
+        img = img.astype(np.int16)
+    elif img.dtype == 'float64':
+        img = img.astype(np.float32)
+    return img, affine
+
+
+def save_subject(args, img, affine, sub_row_df=None, sub_name=None, epoch=0, split='train'):
+    """
+    Save a subject to disk. If epoch is 0 and sub_row_df is provided, the subject's reference 
+    modalities are rigidly registered to the subject's reconstructed image and saved to disk.
+    Args:
+        args: arguments
+        img: image
+        affine: affine matrix
+        sub_row_df: row of the dataframe if available
+        sub_name: subject name if available (only used if sub_row_df is not provided!!)
+        epoch: epoch number
+        split: split name
+    """
+    if sub_row_df is not None:
+        sub_name = sub_row_df['subject_id']
+    elif sub_name is None:
+        print("No subject name provided, assigning random subject name.")
+        sub_name = 'subject_' + str(np.random.randint(100000))
+
+    img, affine = typecheck_img_affine(img, affine)
+    mytx = None
+    modalities = args['dataset']['modalities']
+    for i, mod in enumerate(modalities): # for each modality (last modality is segmentation)
+        if i == len(modalities)-1 and 'Seg' in mod:
+            img_mod = img[..., i].astype(np.int16)
+        else:
+            img_mod = img[..., i].astype(np.float32)
+        filename = f'{split}/{mod}_{sub_name}_ep={epoch}.nii.gz'
+        save_img(img_mod, affine, args['output_dir'], filename)
+        if epoch == 0 and sub_row_df is not None: # if first epoch, register reference modalities to predicted image
+            is_seg = (i == len(modalities)-1 and 'Seg' in mod)
+            pred_mod_nii = nib.Nifti1Image(img_mod, affine) # load predicted modality
+            pred_mask_nii = nib.Nifti1Image(img[..., -1], affine) # load segmentation as mask
+            ref_mod_nii = nib.load(sub_row_df[mod]) # load reference modality
+            pred_mod_nii, ref_mod_nii, mytx = reg_imgs(pred_mod_nii, ref_mod_nii, pred_mask_nii, mytx, 'Rigid', is_seg)
+            filename_ref = f'{split}/{mod}_{sub_name}_ref.nii.gz'
+            save_img(ref_mod_nii.get_fdata(), ref_mod_nii.affine, args['output_dir'], filename_ref)
+
+
+def save_img(img, affine, output_path, filename):
+    if img.dtype == 'int64' or img.dtype == 'int32':
+        img = img.astype(np.int16)
+    elif img.dtype == 'float64':
+        img = img.astype(np.float32)
+    full_path = os.path.join(output_path, filename)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    img_nii = nib.Nifti1Image(img, affine)
+    nib.save(img_nii, full_path)
+    print(f'Saved {filename} to {output_path}')
+
+
+def assert_correct_coord_normalization(coords, min_val=-1.0, max_val=1.0):
+    """
+    Args:
+        coords: numpy array of shape (n, 3)
+        min_val: minimum allowed value of the normalized coordinates
+        max_val: maximum allowed value of the normalized coordinates
+    """
+    min_x, min_y, min_z = coords.min(axis=0)
+    max_x, max_y, max_z = coords.max(axis=0)
+    assert min_x >= min_val, f"min_x = {min_x} is less than min_val = {min_val}"
+    assert max_x <= max_val, f"max_x = {max_x} is greater than max_val = {max_val}"
+    assert min_y >= min_val, f"min_y = {min_y} is less than min_val = {min_val}"
+    assert max_y <= max_val, f"max_y = {max_y} is greater than max_val = {max_val}"
+    assert min_z >= min_val, f"min_z = {min_z} is less than min_val = {min_val}"
+    assert max_z <= max_val, f"max_z = {max_z} is greater than max_val = {max_val}"
+
+def squeeze_modalities(modality, path, write2disk=False):
+    '''
+    Helper as some modalities in dhcp have 4 dimensions, i.e. (x, y, z, 1)
+    This function squeezes the last dimension and writes the result to disk if write2disk is True
+    '''
+    if modality.ndim == 4:
+        mod_np = modality.get_fdata()
+        mod_np = np.squeeze(mod_np)
+        mod_nii = nib.Nifti1Image(mod_np, modality.affine)
+        if write2disk:
+            mod_nii.to_filename(path)
+        return mod_nii
+    else:
+        return modality
+
+# add background halo to segmentation to allow masking of the brain in the postprsocessing step
+def add_background_halo(label_names, seg_nii, halo_width=1.5, background_label_str='BG'):
+    seg = seg_nii.get_fdata()
+    bg_label = label_names.index(background_label_str)
+    mask_bg = (seg>0).astype(np.float32)
+    mask_bg = (ndi.gaussian_filter(mask_bg, sigma=halo_width) > 0.001).astype(np.uint8) * bg_label
+    mask_bg[seg > 0] = seg[seg > 0]
+    return nib.Nifti1Image(mask_bg, seg_nii.affine)
+
+
+def mask_nifti(nii, mask):
+    data = nii.get_fdata()
+    data *= mask
+    return nib.Nifti1Image(data, nii.affine)
+
+
+def compute_metrics(args, pred, affine, df_row_dict, epoch, split, reg_type='Rigid', bg_label=None):
+    """
+    Compute metrics for a predicted subject. Assumes that all reference modalities are already aligned.
+    Args:
+        pred: predicted subject of shape (x,y,z, num_modalities)
+        affine: affine matrix of the predicted subject
+        df_row_dict: dictionary containing the ground truth subject information
+        reg_type: registration type
+        bg_label: background label, if not specified, it is assumed to be the label with with id 'BG'
+    Returns:
+        metrics: dictionary containing the computed metrics
+    """
+    pred, affine = typecheck_img_affine(pred, affine)
+    metrics = {'Subject': df_row_dict['subject_id'], 'PSNR': [], 'SSIM': [], 'DICE': []}
+    modalities = args['dataset']['modalities']
+    sub_id = df_row_dict['subject_id']
+
+    if bg_label is None and 'BG' in args['dataset']['label_names']:
+        bg_label = args['dataset']['label_names'].index('BG')
+    else:
+        bg_label = 0 # default background label
+
+    if 'Seg' in modalities[-1]:
+        mask_ref_nii = nib.load(df_row_dict[modalities[-1]])
+    else:
+        mask_ref_nii = None
+        print("No segmentation provided, no mask can be used. Metrics likely not correct." )
+    
+    mytx = None
+    for i, mod in enumerate(modalities):
+        is_seg = (i == len(modalities)-1 and 'Seg' in mod)
+        mod_ref_nii = nib.load(df_row_dict[mod])
+        mod_pred_nii = nib.Nifti1Image(pred[..., i], affine)
+        mod_pred_reg_nii, mod_ref_nii, mytx = reg_imgs(mod_pred_nii, mod_ref_nii, 
+                                                       mask_ref_nii, mytx, reg_type, is_seg)
+
+        # crop imgs to avoid background from boosting the metrics
+        bbox = get_bbox(mod_ref_nii)[0]
+        x_min, y_min, z_min = bbox[0]
+        x_max, y_max, z_max = bbox[1]+1
+        mod_pred_reg_cropped = mod_pred_reg_nii.get_fdata()[x_min:x_max, y_min:y_max, z_min:z_max]
+        mod_ref_cropped = mod_ref_nii.get_fdata()[x_min:x_max, y_min:y_max, z_min:z_max]
+        if not is_seg:
+            metrics['PSNR'].append(psnr_metric(mod_pred_reg_cropped, mod_ref_cropped))
+            metrics['SSIM'].append(ssim_metric(mod_pred_reg_cropped, mod_ref_cropped, data_range=1))
+        else:
+            metrics['DICE'].append(compute_dice(mod_pred_reg_cropped, mod_ref_cropped, bg_label))
+        
+        if args['save_imgs'][split]:
+            fn_pred = f'{split}/{mod}_{sub_id}_ep={epoch}.nii.gz'
+            fn_ref = f'{split}/{mod}_{sub_id}_ref.nii.gz'
+            save_img(mod_pred_reg_cropped, affine, args['output_dir'], fn_pred)
+            save_img(mod_ref_cropped, affine, args['output_dir'], fn_ref)
+
+    return metrics
+
+
+def reg_imgs(fix_nii, mov_nii, mask_mov_nii=None, mytx=None, reg_type='Rigid', is_seg=False):
+    """
+    Normalizes, masks, and registers a moving image to a fixed image.
+    Args:
+        fix_nii: fixed image as nib.Nifti1Image
+        mov_nii: moving image as nib.Nifti1Image
+        mask_mov_nii: mask of the moving image as nib.Nifti1Image
+        mytx: transformation matrix from previous registration or None
+        reg_type: registration type
+        is_seg: whether the image is a segmentation (if True, use label interpolation)
+    Returns:
+        fix_reg: normalized fixed image as nib.Nifti1Image
+        mov_reg: normalized moving image as nib.Nifti1Image
+        mytx: transformation matrix from registration
+    """
+    fix, mov = ants.from_nibabel(fix_nii), ants.from_nibabel(mov_nii)
+    mask_mov = ants.from_nibabel(mask_mov_nii) > 0 if mask_mov_nii is not None else None
+    ip = 'genericLabel' if is_seg else 'linear'
+
+    if mytx is None:
+        mov = mov * mask_mov if mask_mov is not None else mov
+        mytx = ants.registration(fix, mov, type_of_transform=reg_type)
+        mov_reg = mytx['warpedmovout']
+    else:
+        mov_reg = ants.apply_transforms(fix, mov, mytx['fwdtransforms'], interpolator=ip)
+    if mask_mov is not None: # apply mask to fixed image if provided
+        mask_mov_reg = ants.apply_transforms(fix, mask_mov, mytx['fwdtransforms'], interpolator='genericLabel')
+        fix = fix * mask_mov_reg
+    if not is_seg: # normalize segmentation to [0, 1]
+        mov_reg = (mov_reg-mov_reg.min())/(mov_reg.max()-mov_reg.min())
+        fix = (fix-fix.min())/(fix.max()-fix.min())
+
+    fix_nii = ants.to_nibabel(fix)
+    mov_reg_nii = ants.to_nibabel(mov_reg)
+    return fix_nii, mov_reg_nii, mytx
+
+
+def get_bbox(img):
+    """
+    Get the smallest bounding box that contains all non-zero voxels.
+    Args:
+        img: nib.Nifti1Image or numpy array
+    Returns:
+        bbox: numpy array of shape (2, 3), min (x,y,z) and max (x,y,z)
+        cropped_img: numpy array of shape (x,y,z)
+    """
+    if isinstance(img, nib.Nifti1Image):
+        img = img.get_fdata()
+    non_zero_voxels = np.argwhere(img != 0)
+    min_coords = non_zero_voxels.min(axis=0)
+    max_coords = non_zero_voxels.max(axis=0)
+    img_cropped = img[min_coords[0]:max_coords[0]+1, 
+                      min_coords[1]:max_coords[1]+1, 
+                      min_coords[2]:max_coords[2]+1]
+    return np.stack([min_coords, max_coords], axis=0), img_cropped
+
+
+def compute_dice(pred, ref, bg_label):
+    """
+    Compute the Dice score between a predicted and a reference segmentation.
+    Ignores the background labels 0 and bg_label.
+    
+    Args:
+        pred (np.ndarray): predicted segmentation, shape (X,Y,Z)
+        ref (np.ndarray): reference segmentation, shape (X,Y,Z)
+        bg_label (int): label value to ignore (in addition to 0)
+    
+    Returns:
+        float: Average Dice score across non-background labels.
+    
+    Raises:
+        ValueError: If input shapes of 'pred' and 'ref' do not match.
+    """
+    # Ensure that the shapes of pred and ref match
+    if pred.shape != ref.shape:
+        raise ValueError("The shape of pred and ref must be the same.")
+    
+    # Compute the union of labels from both pred and ref 
+    # so that we don't miss any label that appears in one but not in the other.
+    labels = np.union1d(np.unique(pred), np.unique(ref))
+    
+    # Exclude background labels: both 0 and the provided bg_label.
+    labels = labels[(labels != 0) & (labels != bg_label)]
+    
+    # If no labels remain, either everything is background 
+    # or there is no relevant information, return 1.0 (perfect match) or raise an error.
+    if len(labels) == 0:
+        return 1.0
+    
+    dice_scores = []
+    for label in labels:
+        # Create boolean masks for the current label
+        pred_mask = (pred == label)
+        ref_mask = (ref == label)
+        
+        # Compute intersection and size of each mask using count_nonzero
+        intersection = np.count_nonzero(pred_mask & ref_mask)
+        pred_sum = np.count_nonzero(pred_mask)
+        ref_sum = np.count_nonzero(ref_mask)
+        
+        # When both masks are empty, consider the score perfect (dice = 1.0).
+        if pred_sum + ref_sum == 0:
+            dice = 1.0
+        else:
+            dice = (2.0 * intersection) / (pred_sum + ref_sum)
+        dice_scores.append(dice)
+    
+    # Return the mean dice over all labels.
+    return np.mean(dice_scores)
+
+
+def log_metrics(args, metrics, epoch, df=None, split='train'):
+    """
+    Log metrics to wandb and save to disk
+    Metrics are of the form: [metrics_sub-1, ..., metrics_sub-N] with
+    metrics_sub-i = {metric-1: [val-mod1, val-mod2, ...], metric-2: [val-mod1, val-mod2, ...]}
+    """
+    metrics_keys = list(metrics[0].keys())
+    mod_keys = args['dataset']['modalities']
+    for metric_key in metrics_keys:
+        if metric_key == 'Subject': continue
+        metric_vals = [m[metric_key][0] for m in metrics]
+        metric_vals = np.array(metric_vals) 
+        metric_mean = np.mean(metric_vals, axis=0).item()
+        metric_std = np.std(metric_vals, axis=0).item()
+        print(f"{metric_key}: {metric_mean:.3f} +/- {metric_std:.3f}")
+        if args['logging']: wd.log({f"{split}/{metric_key}": metric_mean})
+
+    # save to disk as json with proper formatting and indentation
+    with open(os.path.join(args['output_dir'], f'{split}/{split}_metrics_ep={epoch}.json'), 'w') as f:
+        json.dump(metrics, f, indent=4, cls=NumpyEncoder)
+    if df is not None:
+        df.to_csv(os.path.join(args['output_dir'], f'{split}/{split}_df.csv'), index=False)
+
+
+def log_loss(loss, epoch, split, log=True):
+    if log: 
+        wd.log({f"{split}/loss": loss['total'].item()})
+        wd.log({f"{split}/loss_sr": loss['sr'].item()})
+        wd.log({f"{split}/loss_seg": loss['seg'].item()})
+        wd.log({f"{split}/loss_tf_rot": loss['tf_rot'].item()})
+        wd.log({f"{split}/loss_tf_trans": loss['tf_trans'].item()})
+        wd.log({f"{split}/loss_tf_scale": loss['tf_scale'].item()})
+        wd.log({f"{split}/loss_tf": loss['tf'].item()})
+        wd.log({f"{split}/epoch": epoch})
+
+
+def normalize_intensities(values, norm_type):
+    """
+    Normalize values according to norm_type
+    Args:
+        values: numpy array of shape (n_samples, n_modalities) # last modality is segmentation
+        norm_type: str, 'minmax' or 'zscore'
+    Returns:
+        normalized_values: numpy array of shape (n_samples, n_modalities)
+    """
+    values = np.clip(values, 0, None)
+    values_mod = values[..., :-1]
+    if norm_type == 'minmax':
+        v_min, v_max = values_mod.min(axis=0), values_mod.max(axis=0)
+        values_mod = (values_mod - v_min) / (v_max - v_min)
+    elif norm_type == 'zscore':
+        v_mean, v_std = values_mod.mean(axis=0), values_mod.std(axis=0)
+        values_mod = (values_mod - v_mean) / (v_std + 1e-5)
+    values[..., :-1] = values_mod
+    return values
+
+
+def denormalize_conditions(args, cond_key, values):
+    """
+    Denormalize values according to the constraints in the dataset
+    Args:
+        args: arguments
+        cond_key: key of the condition in the dataset
+        values: numpy array of shape (n_samples, n_modalities)
+    Returns:
+        denormalized_values: numpy array of shape (n_samples, n_modalities)
+    """
+    c_min = args['dataset']['constraints'][cond_key]['min']
+    c_max = args['dataset']['constraints'][cond_key]['max']
+    c_scale = args['atlas_gen']['cond_scale']
+    values = (values / c_scale + 1) / 2 * (c_max - c_min) + c_min
+    return values

@@ -1,0 +1,5 @@
+subject_id	session_id	scan_age	birth_age	rad_score	sex	dataset_id		T1w	T2w	SegEM9				
+sub-CC00108XX09_ses-36800	36800	42.57	40	1	F	dhcp_neo		PATH_TO_T1W	PATH_TO_T2W	PATH_TO_SEG				
+sub-CC00133XX10_ses-44500	44500	37	36.42857143	3	F	dhcp_neo		PATH_TO_T1W	PATH_TO_T2W	PATH_TO_SEG				
+sub-CC01085XX14_ses-71230	71230	34.57		1	NR	dhcp_fetal		PATH_TO_T1W	PATH_TO_T2W	PATH_TO_SEG				
+É														

@@ -1,439 +1,129 @@
-dhcp_neo:
-  datasets: ['dhcp_neo']
-  modalities:
-#    names: ['T2w', 'T1w', ' Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-    names: ['T2w', 'Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
+dhcp_neo_mm: # dhcp neonates multimodal dataset config
+  dataset_name: dhcp_neo
+  subject_ids: ./configs/subject_ids.yaml # yaml file containing the subject ids to sample from
+  tsv_file: ./configs/dhcp_combined_sessions_ext.tsv # tsv file containing the data and file paths
+  modalities: ['T2w', 'T1w', 'SegEM9'] # modality names in the tsv file 
   conditions:  # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0  # hard coded in sampling!!!
-    pnatal_age: 0  # hard coded in sampling!!!
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0
-    pathology: 0
+    scan_age: false # usually false, as we never explicitly use scan age for atlas generation as it's done implcitly through latent regression
+    birth_age: false # true if birth age is used for explicit condition of atlas generation 
   constraints:  # sample only subjects that meet all constraints
-    scan_age: [37, 46] # Term setup
-#    scan_age: [39, 46]  # preTerm setup
-#    scan_age: [30, 45]  # preTerm setup2
-    birth_age: [37, 42] # Term setup
-#    birth_age: [23, 40] # preTerm setup
-#    birth_age: [26, 41] # preTerm setup2
-    pnatal_age: False # [26, 43] [37, 43] # before 37 weeks is considered pre-term
-    state: [-1, 1]
-    rad_score: [0, 1.1] # Term setup
-#    rad_score: [0, 2.1] # preTerm setup
-    sex: [-1.1, 1.1]
-    brain_vol: False
-    label_vol: False
-    pathology: False
-  label_names: [ 'ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala' ]
-#  out_dim: [ 1, 1, 10 ]
-  out_dim: [ 1, 10 ]
-  # datasets
-  dhcp_neo:
-#    file_ids: [ '*_desc-restore_T2w.nii.gz', '*_desc-restore_T1w.nii.gz', '*_desc-drawem9_dseg.nii.gz' ]
-    file_ids: [ '*_desc-restore_T2w.nii.gz', '*_desc-drawem9_dseg.nii.gz' ]
-    data_path: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/*/*/anat
-    tsv_file: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/dhcp_neo_stats.tsv
-    n_subjects:
-      train: 400
-      val: 200
+    scan_age: 
+      type: numeric # numeric, categoric, or binary
+      min: 37 # min value to sample 
+      max: 46 # max value to sample
+      distribution: # distribution of the values to sample, if dropped we sample randomly from the range
+        type: 'uniform_fillup' # so far only uniform fillup is supported 
+        priority: 10 # higher priority means more important
+    birth_age: 
+      type: numeric
+      min: 37
+      max: 42
+      distribution: 
+        type: 'uniform_fillup'
+        priority: 0
+    rad_score: 
+      type: numeric
+      min: 0
+      max: 1.1
+      # >> no distribution means we sample randomly from the range
+
+  label_names: ['ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala']
+  class_weights: [0.00, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  # class_weights: [0.00, 2.0, 3.0, 2.0, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0]
+  world_bbox: [155, 155, 155] # size of the (roughly) smallest COMMON bounding box for all subjects in mm
+  normalize_values: 'minmax' # 'minmax' or 'zscore'
 
 
-dhcp_neo_term_mm:
-  datasets: ['dhcp_neo']
-  modalities:
-    names: ['T2w', 'T1w', ' Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-#    names: ['T2w', 'Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
+dhcp_neo_preterm_mm: # dhcp preterm multimodal dataset config
+  dataset_name: dhcp_neo
+  subject_ids: ./configs/subject_ids.yaml
+  tsv_file: ./configs/dhcp_combined_sessions_ext.tsv
+  modalities: ['T2w', 'T1w', 'SegEM9'] # modality names in the tsv file
   conditions:  # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0  # hard coded in sampling!!!
-    pnatal_age: 0  # hard coded in sampling!!!
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0
-    pathology: 0
+    scan_age: false
+    birth_age: true
   constraints:  # sample only subjects that meet all constraints
-    scan_age: [37, 46] # Term setup
-    birth_age: [37, 42] # Term setup
-    pnatal_age: False # [26, 43] [37, 43] # before 37 weeks is considered pre-term
-    state: [-1, 1]
-    rad_score: [0, 1.1] # Term setup
-    sex: [-1.1, 1.1]
-    brain_vol: False
-    label_vol: False
-    pathology: False
-  label_names: [ 'ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala' ]
-  out_dim: [ 1, 1, 10 ]
-  # datasets
-  dhcp_neo:
-    file_ids: [ '*_desc-restore_T2w.nii.gz', '*_desc-restore_T1w.nii.gz', '*_desc-drawem9_dseg.nii.gz' ]
-    data_path: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/*/*/anat
-    tsv_file: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/dhcp_neo_stats.tsv
-    n_subjects:
-      train: 400
-      val: 200
+    scan_age: 
+      type: numeric
+      min: 37
+      max: 46
+      distribution: 
+        type: 'uniform_fillup'
+        priority: 0 # higher priority means more important
+    birth_age: 
+      type: numeric
+      min: 25
+      max: 42
+      distribution: 
+        type: 'uniform_fillup'
+        priority: 10
+    rad_score: 
+      type: numeric
+      min: 0
+      max: 3.1
 
-dhcp_neo_term_mono:
-  datasets: ['dhcp_neo']
-  modalities:
-    names: ['T2w', 'Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-  conditions:  # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0  # hard coded in sampling!!!
-    pnatal_age: 0  # hard coded in sampling!!!
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0
-    pathology: 0
-  constraints:  # sample only subjects that meet all constraints
-    scan_age: [37, 46] # Term setup
-    birth_age: [37, 42] # Term setup
-    pnatal_age: False # [26, 43] [37, 43] # before 37 weeks is considered pre-term
-    state: [-1, 1]
-    rad_score: [0, 1.1] # Term setup
-    sex: [-1.1, 1.1]
-    brain_vol: False
-    label_vol: False
-    pathology: False
-  label_names: [ 'ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala' ]
-  out_dim: [ 1, 10 ]
-  # datasets
-  dhcp_neo:
-    file_ids: [ '*_desc-restore_T2w.nii.gz', '*_desc-drawem9_dseg.nii.gz' ]
-    data_path: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/*/*/anat
-    tsv_file: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/dhcp_neo_stats.tsv
-    n_subjects:
-      train: 400 # 400
-      val: 200 # 100
-
-dhcp_neo_term_mono_rot:
-  datasets: ['dhcp_neo']
-  modalities:
-    names: ['T2w', 'Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-  conditions:  # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0  # hard coded in sampling!!!
-    pnatal_age: 0  # hard coded in sampling!!!
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0
-    pathology: 0
-  constraints:  # sample only subjects that meet all constraints
-    scan_age: [37, 46] # Term setup
-    birth_age: [37, 42] # Term setup
-    pnatal_age: False # [26, 43] [37, 43] # before 37 weeks is considered pre-term
-    state: [-1, 1]
-    rad_score: [0, 1.1] # Term setup
-    sex: [-1.1, 1.1]
-    brain_vol: False
-    label_vol: False
-    pathology: False
-  label_names: [ 'ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala' ]
-  out_dim: [ 1, 10 ]
-  # datasets
-  dhcp_neo:
-    file_ids: [ '*_desc-restore_T2w_rot4DL.nii.gz', '*_desc-drawem9_dseg_rot4DL.nii.gz' ]
-    data_path: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/*/*/anat
-    tsv_file: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/dhcp_neo_stats.tsv
-    n_subjects:
-      train: 400 # 400
-      val: 200 # 100
-
-dhcp_neo_preterm_T1:
-  datasets: ['dhcp_neo']
-  modalities:
-    names: ['T1w', ' Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-#    names: ['T2w', 'Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-  conditions:  # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 1  # hard coded in sampling!!!
-    pnatal_age: 0  # hard coded in sampling!!!
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0
-    pathology: 0
-  constraints:  # sample only subjects that meet all constraints
-    scan_age: [37, 46] # preTerm setup
-    birth_age: [25, 42] # preTerm setup
-    pnatal_age: False # [26, 43] [37, 43] # before 37 weeks is considered pre-term
-    state: [-1, 1]
-    rad_score: [0, 3.1] # preTerm setup
-    sex: [-1.1, 1.1]
-    brain_vol: False
-    label_vol: False
-    pathology: False
-  label_names: [ 'ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala' ]
-  out_dim: [ 1, 10 ]
-  # datasets
-  dhcp_neo:
-    file_ids: [ '*_desc-restore_T1w.nii.gz', '*_desc-drawem9_dseg.nii.gz' ]
-    data_path: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/*/*/anat
-    tsv_file: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/dhcp_neo_stats.tsv
-    n_subjects:
-      train: 100
-      val: 50
-
-dhcp_neo_preterm_mm:
-  datasets: ['dhcp_neo']
-  modalities:
-    names: ['T2w', 'T1w', ' Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-#    names: ['T2w', 'Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-  conditions:  # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 1  # hard coded in sampling!!!
-    pnatal_age: 0  # hard coded in sampling!!!
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0
-    pathology: 0
-  constraints:  # sample only subjects that meet all constraints
-    scan_age: [37, 46] # preTerm setup
-    birth_age: [25, 42] # preTerm setup
-    pnatal_age: False # [26, 43] [37, 43] # before 37 weeks is considered pre-term
-    state: [-1, 1]
-    rad_score: [0, 3.1] # preTerm setup
-    sex: [-1.1, 1.1]
-    brain_vol: False
-    label_vol: False
-    pathology: False
-  label_names: [ 'ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala' ]
-  out_dim: [ 1, 1, 10 ]
-  # datasets
-  dhcp_neo:
-    file_ids: [ '*_desc-restore_T2w.nii.gz', '*_desc-restore_T1w.nii.gz', '*_desc-drawem9_dseg.nii.gz' ]
-    data_path: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/*/*/anat
-    tsv_file: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/dhcp_neo_stats.tsv
-    n_subjects:
-      train: 100
-      val: 50
-
-
-dhcp_neo_preterm_mono:
-  datasets: ['dhcp_neo']
-  modalities:
-    names: ['T2w', 'Seg'] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg']
-  conditions:  # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 1  # hard coded in sampling!!!
-    pnatal_age: 0  # hard coded in sampling!!!
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0
-    pathology: 0
-  constraints:  # sample only subjects that meet all constraints
-    scan_age: [37, 46] # preTerm setup
-    birth_age: [25, 42] # preTerm setup
-    pnatal_age: False # [26, 43] [37, 43] # before 37 weeks is considered pre-term
-    state: [-1, 1]
-    rad_score: [0, 3.1] # preTerm setup
-    sex: [-1.1, 1.1]
-    brain_vol: False
-    label_vol: False
-    pathology: False
-  label_names: [ 'ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala' ]
-  out_dim: [ 1, 10 ]
-  # datasets
-  dhcp_neo:
-    file_ids: [ '*_desc-restore_T2w.nii.gz', '*_desc-drawem9_dseg.nii.gz' ]
-    data_path: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/*/*/anat
-    tsv_file: /path/to/data/dhcp_neo/rel3_dhcp_anat_pipeline/dhcp_neo_stats.tsv
-    n_subjects:
-      train: 100
-      val: 50
+  label_names: ['ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala']
+  class_weights: [0.00, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  world_bbox: [155, 155, 155] # size of the (roughly) smallest COMMON bounding box for all subjects in mm
+  normalize_values: 'minmax' # 'minmax' or 'zscore'
 
 
 dhcp_fetal:
-  datasets: ['dhcp_fetal']
-  modalities:
-    names: [ 'T2w', 'Seg' ] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg'] # ['*_desc-restore_T2w.nii.gz' '*_desc-drawem9_dseg.nii.gz']
-  conditions: # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0
-    pnatal_age: 0
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0 #[5] # [5, 6]
-    pathology: 0
-  constraints: # sample only subjects that meet all constraints
-    scan_age: [20, 40]
-    birth_age: False
-    pnatal_age: False
-    state: [-1, 1]
-    rad_score: [0, 1.1]
-    sex: [-1.1, 1.1]
-    brain_vol: False
-    label_vol: False
-    pathology: False # ['IRM_normale', 'ventriculomegalie']
-  label_names: [ 'ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala']
-  out_dim: [ 1, 10 ]
-  # datasets
-  dhcp_fetal:
-    file_ids: [ '*_desc-restore_T2w.nii.gz', '*_desc-drawem9_dseg.nii.gz' ]
-    data_path: /path/to/data/fetal273/fmri/dhcp_anat_pipeline/*/*/anat
-    tsv_file: /path/to/data/fetal273/fmri/dhcp_anat_pipeline/dhcp_fetal_stats.tsv
-    n_subjects:
-      train: 300
-      val: 200
+  dataset_name: dhcp_fetal
+  subject_ids: ./configs/subject_ids.yaml
+  tsv_file: ./configs/dhcp_combined_sessions_ext.tsv
+  modalities: ['T2w', 'SegEM9'] # modality names in the tsv file
+  conditions:  # conditions with number of dimensions possibly used for atlas conditioning; conditions must be in constraints as lookup for normalization bounds
+    scan_age: false
+  constraints:  # sample only subjects that meet all constraints
+    scan_age: 
+      type: numeric
+      min: 20
+      max: 40
+      distribution: 
+        type: 'uniform_fillup'
+        priority: 10 # higher priority means more important
+    rad_score: 
+      type: numeric
+      min: 0
+      max: 1.1
 
-
-# TODO: take care of normalization problem for nesvor reconstructions!!
-marsfet:
-  datasets: [ 'marsfet' ]
-  modalities:
-    names: [ 'T2w', 'Seg' ] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg'] # ['*_desc-restore_T2w.nii.gz' '*_desc-drawem9_dseg.nii.gz']
-  conditions: # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0
-    pnatal_age: 0
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: [7, 8]
-    pathology: 0
-  constraints: # sample only subjects that meet all constraints
-    scan_age: [ 20, 40 ]
-    birth_age: False
-    pnatal_age: False
-    state: [ -1, 1 ]
-    rad_score: [ 0.1, 4.1 ] # marsfet is QC scored from 0 to 4, (0 unusable, 4 best quality)
-    sex: False
-    brain_vol: False
-    label_vol: False
-    pathology: ['IRM_normale', 'ventriculomegalie']
-  label_names: ["ClearLabel", "eCSF_L", "eCSF_R", "Cortical_GM_L", "Cortical_GM_R", "Fetal_WM_L", "Fetal_WM_R",
-                "Lateral_Ventricle_L", "Lateral_Ventricle_R", "Cavum_septum_pellucidum", "Brainstem",
-                "Cerebellum_L", "Cerebellum_R", "Cerebellar_Vermis", "Basal_Ganglia_L", "Basal_Ganglia_R",
-                "Thalamus_L", "Thalamus_R", "Third_Ventricle", "Fourth Ventricle", "Corpus_Callosum", "BG"]
-  out_dim: [ 1, 22 ]
-  # datasets
-  marsfet:
-    file_ids: [ 'img.nii.gz', 'seg.nii.gz' ]
-    data_path:
-    tsv_file:
-    n_subjects:
-      train: 128
-      val: 18
-
-marsfet_nnUNet_normale:
-  datasets: [ 'marsfet_nnUNet' ]
-  modalities:
-    names: [ 'T2w', 'Seg' ] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg'] # ['*_desc-restore_T2w.nii.gz' '*_desc-drawem9_dseg.nii.gz']
-  conditions: # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0
-    pnatal_age: 0
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0 #[5]
-    pathology: 0
-  constraints: # sample only subjects that meet all constraints
-    scan_age: [ 20, 40 ]
-    birth_age: False
-    pnatal_age: False
-    state: [ -1, 1 ]
-    rad_score: [ 2.1, 4.1 ] # marsfet is QC scored from 0 to 4, (0 unusable, 4 best quality)
-    sex: False #[ -1, 1 ]
-    brain_vol: False
-    label_vol: False
-    pathology: ['IRM_normale']#, 'ventriculomegalie']
   label_names: ['ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala']
-  out_dim: [ 1, 10 ]
-  # datasets
-  marsfet_nnUNet:
-    file_ids: [ 'img.nii.gz', 'seg.nii.gz' ]
-    data_path:
-    tsv_file:
-    n_subjects:
-      train: 128
-      val: 40
+  class_weights: [0.00, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  world_bbox: [155, 155, 155] # size of the (roughly) smallest COMMON bounding box for all subjects in mm
+  normalize_values: 'minmax' # 'minmax' or 'zscore'
 
-marsfet_nnUNet_VM:
-  datasets: [ 'marsfet_nnUNet' ]
-  modalities:
-    names: [ 'T2w', 'Seg' ] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg'] # ['*_desc-restore_T2w.nii.gz' '*_desc-drawem9_dseg.nii.gz']
-  conditions: # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0
-    pnatal_age: 0
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: [5]
-    pathology: 0
-  constraints: # sample only subjects that meet all constraints
-    scan_age: [ 20, 40 ]
-    birth_age: False
-    pnatal_age: False
-    state: [ -1, 1 ]
-    rad_score: [ -2.1, 4.1 ] # marsfet is QC scored from 0 to 4, (0 unusable, 4 best quality)
-    sex: False #[ -1, 1 ]
-    brain_vol: False
-    label_vol: False
-    pathology: ['IRM_normale', 'ventriculomegalie']
-  label_names: ['ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala']
-  out_dim: [ 1, 10 ]
-  # datasets
-  marsfet_nnUNet:
-    file_ids: [ 'img.nii.gz', 'seg.nii.gz' ]
-    data_path:
-    tsv_file:
-    n_subjects:
-      train: 128
-      val: 40
 
-marsfet_nnUNet_ACC:
-  datasets: [ 'marsfet_nnUNet' ]
-  modalities:
-    names: [ 'T2w', 'Seg' ] # ['T2w', 'T1w', 'Seg']  # ['T2w', 'Seg'] # ['*_desc-restore_T2w.nii.gz' '*_desc-drawem9_dseg.nii.gz']
-  conditions: # conditions with number of dimensions possibly used for atlas conditioning
-    scan_age: 0
-    birth_age: 0
-    pnatal_age: 0
-    state: 0
-    rad_score: 0 # radiology score
-    sex: 0
-    brain_vol: 0
-    label_vol: 0 #[5]
-    pathology: 1
-  constraints: # sample only subjects that meet all constraints
-#    scan_age: [ 20, 40 ]
-    scan_age: [ 22, 32 ]
-    birth_age: False
-    pnatal_age: False
-    state: [ -1, 1 ]
-    rad_score: [ 2.1, 4.1 ] # marsfet is QC scored from 0 to 4, (0 unusable, 4 best quality)
-    sex: False #[ -1, 1 ]
-    brain_vol: False
-    label_vol: False
-    pathology: ['IRM_normale', 'ACC_complete']#, 'ventriculomegalie']
+marsfet_nnUNet:
+  dataset_name: marsfet_nnUNet
+  subject_ids: ./configs/subject_ids.yaml
+  tsv_file: ./configs/marsfet_participants_nnUNet.tsv
+  modalities: ['T2w', 'Seg_nnUNet9'] # modality names in the tsv file
+  conditions:  # conditions with number of dimensions possibly used for atlas conditioning; conditions must be in constraints as lookup for normalization bounds
+    scan_age: false
+    pathology: false
+    lv_volume_normed: true
+  constraints:  # sample only subjects that meet all constraints
+    scan_age: 
+      type: numeric
+      min: 20
+      max: 40
+      distribution: 
+        type: 'uniform_fillup'
+        priority: 10 # higher priority means more important
+    pathology:  # sample only subjects that meet the category
+      type: categoric
+      values: ['IRM_normale', 'ventriculomegalie']
+    lv_volume_normed: # conditioning on lateral ventricle volume normalized by brain_volume, precomputed from segmentation and stored in the tsv file
+      type: numeric
+      min: 0.0085
+      max: 0.061
+    rad_score: # image and segmentation quality score for marsfet dataset, 4 is best, 0 worst
+      type: numeric
+      min: 2.1
+      max: 4.1
+
   label_names: ['ClearLabel', 'CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala']
-  out_dim: [ 1, 10 ]
-  # datasets
-  marsfet_nnUNet:
-    file_ids: [ 'img.nii.gz', 'seg.nii.gz' ]
-    data_path:
-    tsv_file:
-    n_subjects:
-      train: 128
-      val: 40
+  class_weights: [0.00, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  world_bbox: [155, 155, 155] # size of the (roughly) smallest COMMON bounding box for all subjects in mm
+  normalize_values: 'minmax' # 'minmax' or 'zscore'
