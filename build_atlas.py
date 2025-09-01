@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from sklearn.neighbors import KNeighborsClassifier, NeighborhoodComponentsAnalysis
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp.grad_scaler import GradScaler
 from models.inr_decoder import INR_Decoder, LatentRegressor
 from data_loading.dataset import Data
 from utils import *
@@ -35,27 +35,26 @@ class AtlasBuilder:
     def train_on_data(self):
         if len(self.args['load_model']['path']) > 0: self.validate(epoch_train=0) 
         loss_hist_epochs = []
-        epoch_iterator = tqdm(range(self.args['epochs']['train']), desc="Training (epochs)", leave=True)
-        for epoch in epoch_iterator:
+        start_time = time.time()
+        for epoch in range(self.args['epochs']['train']):
             if self.args['optimizer']['re_init_latents']: self.re_init_latents()
             loss = self.train_epoch(epoch, split='train')
             loss_hist_epochs.append(loss)
+            print(f"Training: Epoch: {epoch}, Loss: {np.mean(loss_hist_epochs):.4f}, Total Time Epoch: {time.time() - start_time:.2f}s")
             self.validate(epoch) 
             self._update_scheduler(split='train')
-            epoch_iterator.set_postfix(loss=f"{np.mean(loss_hist_epochs):.4f}")
-        
         return np.mean(loss_hist_epochs)
 
     def train_epoch(self, epoch, split):
         self.inr_decoder[split].train() if split == 'train' else self.inr_decoder[split].eval()
         loss_hist_batches = []
-        batch_iterator = tqdm(self.dataloaders[split], 
-                              desc=f"Training ({split}) (epochs)", leave=False)
-
-        for batch in batch_iterator:
+        time_data_loader = time.time()
+        for batch in self.dataloaders[split]:
+            print(f"Split: {split}, Current Epoch: {epoch}, Time Loading Batch: {time.time() - time_data_loader:.2f}s")
+            start_time = time.time()
             loss = self.train_batch(batch, epoch, split)
             loss_hist_batches.append(loss)
-            batch_iterator.set_postfix(loss=f"{np.mean(loss_hist_batches):.4f}")
+            print(f"Split: {split}, Current Epoch: {epoch}, Loss Batch: {loss:.4f}, Total Training Time Batch: {time.time() - start_time:.2f}s")
         return np.mean(loss_hist_batches)
 
     def train_batch(self, batch, epoch, split='train'):
@@ -63,10 +62,9 @@ class AtlasBuilder:
         n_smpls = self.args['n_samples']
         seg_weight = self.args['optimizer']['seg_weight'] if split == 'train' else 0.0
         coords_batch, values_batch, conditions_batch, idx_df_batch = to_device(batch)
-        sample_iterator = tqdm(range(0, idx_df_batch.shape[0], n_smpls),
-                               desc=f"Training ({split}) (samples in batch)", leave=False)
-        
+        sample_iterator = range(0, idx_df_batch.shape[0], n_smpls)
         start_time = time.time()
+        print(f"Split: {split}, Current Epoch: {epoch}, Starting Batch ...\n")
         for i, smpls in enumerate(sample_iterator):
             self.optimizers[split].zero_grad()
             coords = coords_batch[smpls:smpls + n_smpls]
@@ -75,7 +73,7 @@ class AtlasBuilder:
             # during validation we let the model predict the conditions
             conditions = conditions_batch[smpls:smpls + n_smpls] if split == 'train' else self.conditions_val[idx_df]
 
-            with autocast(enabled=self.args['amp']):
+            with torch.autocast(device_type=self.device, enabled=self.args['amp']):
                 values_p = self.inr_decoder[split](coords, self.latents[split], conditions,
                                             self.transformations[split][idx_df], idcs_df=idx_df)
                 loss = self.loss_criterion(values_p, values, self.transformations[split][idx_df], 
@@ -90,14 +88,12 @@ class AtlasBuilder:
                 self.optimizers[split].step()
 
             loss_hist_samples.append(loss['total'].item())
-            # Update tqdm every few steps to reduce overhead
-            if i % 100 == 0 or i == len(sample_iterator) - 1:
-                end_time = time.time()
-                print(f"Time taken for {i} samples: {end_time - start_time:.2f} seconds")
-                start_time = end_time
+            if i % 100 == 0 or i == (len(sample_iterator) - 1):
                 log_loss(loss, epoch, split, self.args['logging'])
-                sample_iterator.set_postfix(loss=f"{np.mean(loss_hist_samples):.4f}")
-        
+                print(f"Split: {split}, Epoch: {epoch}, "
+                      f"Elapsed Training Time Batch: {time.time() - start_time:.2f}s"
+                      f"Progress: {i/len(sample_iterator):.2f},"
+                      f"Loss: {np.mean(loss_hist_samples):.4f},")
         return np.mean(loss_hist_samples)
     
     def validate(self, epoch_train):
@@ -110,11 +106,14 @@ class AtlasBuilder:
         - save model state
         """
         if self.args['generate_cond_atlas']: self.generate_atlas(epoch_train, n_max=100)
-        metrics_train = self.generate_subjects_from_df(idcs_df=[0, 2, 3], epoch=epoch_train, split='train')
-        log_metrics(self.args, metrics_train, epoch_train, df=self.datasets['train'].df, split='train')
 
         # --------- Start Actual Validation ---------
-        if (epoch_train+1) % self.args['validate_every'] == 0 or epoch_train == self.args['epochs']['train'] - 1:
+        if (epoch_train+1) % self.args['validate_every'] == 0 or (epoch_train+1) == self.args['epochs']['train']:
+            # Evaluate reconstruction quality on training subjects specified by idcs_df
+            metrics_train = self.generate_subjects_from_df(idcs_df=[0, 2, 3], epoch=epoch_train, split='train')
+            log_metrics(self.args, metrics_train, epoch_train, df=self.datasets['train'].df, split='train')
+
+            # Evaluate reconstruction quality on validation subjects
             self._init_validation() # reinitialize validation model to avoid information leakage
             for epoch_val in range(self.args['epochs']['val']):
                 self.train_epoch(epoch=epoch_val, split='val') # fit latent codes and tfs to validation set
@@ -132,8 +131,9 @@ class AtlasBuilder:
         """
         grid_coords, grid_shape, affine = generate_world_grid(self.args, device=self.device)
         with torch.no_grad():
-            volume_inf = self.inr_decoder[split].inference(grid_coords, latent_vec, condition_vector, 
-                                                    grid_shape, transformation)
+            with torch.autocast(device_type=self.device, enabled=self.args['amp']):
+                volume_inf = self.inr_decoder[split].inference(grid_coords, latent_vec, condition_vector, 
+                                                        grid_shape, transformation)
         return volume_inf
 
     def generate_subjects_from_df(self, idcs_df=None, epoch=0, split='train'):
@@ -160,6 +160,7 @@ class AtlasBuilder:
         """
         Generate temporal atlas for each condition combination in self.args['atlas_gen']['conditions'].
         """
+        print(f"Generating atlases (depending on resolution and number of atlases this may take some time) ...\n")
         self.inr_decoder['train'].eval()
         grid_coords, grid_shape, affine = generate_world_grid(self.args, device=self.device)
         temp_steps = self.args['atlas_gen']['temporal_values']
@@ -180,6 +181,7 @@ class AtlasBuilder:
                     cond_list.append(values_p.detach().cpu())
                     # free up GPU memory
                     torch.cuda.empty_cache()
+                    
                 atlas_list.append(torch.stack(cond_list, dim=-1))
         atlas_list = torch.stack(atlas_list, dim=-1) # [x, y, z, num_modalities, num_conditions, t]
         save_atlas(self.args, atlas_list, affine, temp_steps, condition_vectors, epoch=epoch)
@@ -199,7 +201,7 @@ class AtlasBuilder:
         ==> sigma = 1 std = 0.5 * 0.75 weeks * c_ratio, e.g. = 0.0825 units for term neonates.
         # Finally, we scale the sigma by the condition scale factor in the config, as scan age is actually normalized to [-cond_scale, cond_scale]
         """
-        c_ratio = 2 / (self.args['dataset']['conditions'][condition_key]['max'] - self.args['dataset']['conditions'][condition_key]['min'])
+        c_ratio = 2 / (self.args['dataset']['constraints'][condition_key]['max'] - self.args['dataset']['constraints'][condition_key]['min'])
         span_weeks = self.args['atlas_gen']['gaussian_span']
         sigma = 0.5 * span_weeks * c_ratio
         sigma = sigma * self.args['atlas_gen']['cond_scale']
@@ -359,7 +361,7 @@ class AtlasBuilder:
         chkp_path = os.path.join(chkp_path, f'checkpoint_epoch_{epoch}.pth')
         if not os.path.exists(chkp_path):
             raise FileNotFoundError(f'State file {chkp_path} not found!')
-        chkp = torch.load(chkp_path)
+        chkp = torch.load(chkp_path, weights_only=False)
         # self.args = chkp['args']
         self._init_dataloading(chkp['tsv_file'], chkp['dataset_df'])
         self._init_inr(chkp['inr_decoder'], split='train')

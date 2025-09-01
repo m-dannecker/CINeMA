@@ -36,7 +36,7 @@ def initial_setup(cmd_args=None):
     print(f"Saved config files to {args['output_dir']}")
 
     if args['inr_decoder']['out_dim'][0] != len(args['dataset']['modalities'])-1:
-        print(f"WARNING: The number of output dimensions ({args['inr_decoder']['out_dim'][0]})" 
+        print(f"WARNING: The number of output dimensions ({args['inr_decoder']['out_dim'][0]}) " 
               f"might not match the number of modalities ({len(args['dataset']['modalities'])-1}).")
     if args['atlas_gen']['conditions'] is not None: # check if all atlas conditions are set True in the dataset config
         for key in args['atlas_gen']['conditions'].keys():
