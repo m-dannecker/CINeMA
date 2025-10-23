@@ -194,12 +194,15 @@ If `logging: True` is set, training progress is logged to Weights & Biases. Make
 If you use CINeMA in your research, please cite:
 
 ```bibtex
-@article{dannecker2025cinema,
-  title={CINeMA: Conditional Implicit Neural Multi-Modal Atlas for a Spatio-Temporal Representation of the Perinatal Brain},
+@ARTICLE{11150663,
   author={Dannecker, Maik and Sideri-Lampretsa, Vasiliki and Starck, Sophie and Mihailov, Angeline and Milh, Mathieu and Girard, Nadine and Auzias, Guillaume and Rueckert, Daniel},
-  journal={arXiv preprint arXiv:2506.09668},
-  year={2025}
-}
+  journal={IEEE Transactions on Medical Imaging}, 
+  title={CINeMA: Conditional Implicit Neural Multi-Modal Atlas for a Spatio-Temporal Representation of the Perinatal Brain}, 
+  year={2025},
+  volume={},
+  number={},
+  pages={1-1},
+  doi={10.1109/TMI.2025.3605194}}
 ```
 
 
