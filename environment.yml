@@ -3,9 +3,7 @@ channels:
   - https://repo.anaconda.com/pkgs/main
   - https://repo.anaconda.com/pkgs/r
 dependencies:
-  - pip
   - python=3.10
-  - ipykernel
+  - pip
   - pip:
     - -r requirements.txt
-prefix: /u/home/danneckm/.conda/envs/cinema

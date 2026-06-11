@@ -2,22 +2,21 @@
 
 **C**onditional **I**mplicit **Ne**ural **M**ulti-Modal **A**tlas for a Spatio-Temporal Representation of the Perinatal Brain
 
-CINeMA is a deep learning framework for building conditional implicit neural multi-modal atlases that provide spatio-temporal representations of the developing brain. The framework uses Implicit Neural Representations (INRs) to create continuous, smooth atlases that can be conditioned on various developmental parameters factors such as age, birth age, and other anatomy like lateral ventricular volume (to mode ventriculomegaly) and the corpus callosum.
+CINeMA is a deep learning framework for building conditional implicit neural multi-modal atlases that provide spatio-temporal representations of the developing brain. The framework uses Implicit Neural Representations (INRs) to create continuous, smooth atlases that can be conditioned on developmental factors such as scan age, birth age, lateral ventricular volume (to model ventriculomegaly), and agenesis of the corpus callosum.
 
 ## Features
 
-- **Multi-modal Atlas Generation**: Support for multi modal learning, like T1w, T2w, and segmentation modalities
-- **Conditional Atlas Building**: Generate atlases conditioned on temporal and other factors, like ventricular volume
-- **Implicit Neural Representations**: Continuous, smooth atlas representations using SIREN networks
-- **Flexible Configuration**: YAML-based configuration system for easy customization
-- **Wandb Integration**: Built-in experiment tracking and logging with weights and biases
-- **GPU Acceleration**: CUDA support for fast training and inference
-- **Multiple Datasets**: Support for DHCP (Developing Human Connectome Project) datasets
+- **Multi-modal reconstruction**: joint T1w / T2w / segmentation learning from a single decoder
+- **Conditional atlas generation**: continuous atlases conditioned on age and arbitrary numeric covariates
+- **Resolution-agnostic INR decoder**: SIREN-based MLP + FiLM modulation from per-subject latent grids
+- **Train once, re-fit later**: load a trained checkpoint and fit per-subject latents for new (possibly seg-free) test subjects with the decoder frozen
+- **Typed, versioned configs**: dataclass-backed YAML configs with explicit dataset / train / atlas separation and `--set` overrides
+- **First-class CLI**: `python -m cinema <subcommand>` drives training, fitting, inference, atlas generation, and evaluation
 
 ## Precomputed Atlases
-You can find pre-computed temporal atlases, modeling neurotypical fetal and neonatal brain development such as fetal brain development with ventriculomegaly (VM) and agenesis of the corpus callosum (ACC), in the [Zenodo repository](https://zenodo.org/records/17023473).
+Pre-computed temporal atlases modeling neurotypical fetal and neonatal brain development — as well as ventriculomegaly (VM) and agenesis of the corpus callosum (ACC) — are available on the [Zenodo repository](https://zenodo.org/records/17023473).
 
-## 📋 Table of Contents
+## Table of Contents
 
 - [Installation](#installation)
 - [Data Preparation](#data-preparation)
@@ -27,7 +26,7 @@ You can find pre-computed temporal atlases, modeling neurotypical fetal and neon
 - [Troubleshooting](#troubleshooting)
 - [Citation](#citation)
 
-## 🛠️ Installation
+## Installation
 
 ### Prerequisites
 
@@ -35,161 +34,199 @@ You can find pre-computed temporal atlases, modeling neurotypical fetal and neon
 - CUDA-compatible GPU (recommended)
 - Conda or Miniconda
 
-### Option 1: Using Conda Environment (Recommended)
+### Option 1: Conda (recommended)
 
-1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd CINeMA
-```
-
-2. Create and activate the conda environment:
-```bash
+cd CINeMA_2
 conda env create -f environment.yml
 conda activate cinema
 ```
 
-### Option 2: Using pip
+### Option 2: pip
 
-1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd CINeMA
-```
-
-2. Install dependencies:
-```bash
+cd CINeMA_2
 pip install -r requirements.txt
 ```
 
-## 📊 Data Preparation
+## Data Preparation
 
-### Supported Datasets
+### Supported datasets
 
-CINeMA was tested on the dHCP (developing Humand Connectome Project) dataset, including neonatal and fetal data, and on an in-house dataset.
-For any dataset to use, you need to specify the following files:
-- **TSV File**: Contains metadata (including all properties you want to condition on, e.g. ventricular volume) and file paths for all subjects
-- **Subject IDs YAML**: Lists subject IDs (same IDs as in the TSV file) for training/validation splits
-- **Configuration Files**: Define dataset parameters, constraints, conditions, etc. 
-The provided templates will help you to get started.
+CINeMA has been validated on the dHCP (developing Human Connectome Project) neonatal and fetal cohorts, and on an in-house fetal cohort with pathology labels (e.g. agenesis of the corpus callosum). Any new dataset needs:
 
-### Data Preprocessing
-- Data is expected to be in nifti format. 
-- All subjects must be roughly in the same orientation. 
-- Fine registration is taken care of by the framework. No prior atlas is needed. 
-- Conditionable properties like ventricular volume must be extracted from the data and stored in the TSV file beforehand.
-- No resampling required! Data can be of different size and spacing due to resolution agnostic properties of INRs. 
+- **TSV file** — metadata + NIfTI paths per subject. Must include every value you want to either condition on or constrain sampling by.
+- **Subject-IDs YAML** — maps split names (`train`, `val`, optional `test`) to lists of subject IDs referenced in the TSV.
+- **Dataset YAML** — declares modalities, conditions, constraints, and normalisation spans. Templates live under [configs/datasets/](configs/datasets/).
 
-### Config Setup
-The config files are located in the `configs` folder. The provided templates are well commented and will help you to get started. Some important things to consider in config_data.yaml:
-- *Conditions*, specify which properties are used for explicit conditioning of the atlas. If set true, they must also be specified in the `atlas_gen` section of config_atlas.yaml. Note, scan_age is usually set to false, as we never explicitly use scan age for atlas generation. Temporal atlas generation is done through latent regression.
-- *Constraints*, specify the range of values for a condition. However, constraints do not need to be conditions. They can be used to cosntrain the sampling process of subjects. If a subject's value is not in this range, it will not be sampled at all. A distribution type can be specified to sample subjects accordingly. E.g. uniform_fillup for scan_age will sample subjects uniformly within the specified range if enough subjects for each age bin are available.
+### Preprocessing expectations
 
-Some important things to consider in config_data.yaml:
-config_atlas.yaml - Atlas generation parameters (*atlas_gen*):
-- *temporal_values*, specify the temporal values (in weeks) for which to generate the atlas.
-- *conditions*, specify which conditions are used for the atlas generation. They must be specified in config_data.yaml as well. Specify *values* for each condition if the condition is used for the atlas generation. Values can be normed between [-1, 1] by setting *normed_values* to true.
-- *gaussian_span*, specifies the span of the gaussian distribution used to regress the latent code from the subjects in weeks.
-- *cond_scale*, specifies the scale of the condition vector. Condition values are concatenated to the latent code which is drawn from a gaussian distribution with sigma=0.01. *cond_scale* scales the condition vector to a similar range. Higher *cond_scale* values leads to higher sensitivity of the model to the condition. 0.10 - 0.15 works well in practice.
+- All volumes in NIfTI format, roughly in the same orientation.
+- No resampling required — INRs operate directly on the subject's voxel grid, so heterogeneous resolutions and spacings are fine.
+- Conditionable properties (e.g. ventricular volume) must be pre-extracted and written into the TSV.
+- Fine rigid / rigid+scale registration is learned by the model (`decoder.tf_dim: 6` or `9`); no prior atlas is needed.
+
+## Configuration
+
+CINeMA 2 splits configs into three layered YAMLs — this replaces the legacy monolithic `config_atlas.yaml` + `config_data.yaml` pair.
+
+```
+configs/
+├── datasets/        # dataset specs (modalities, conditions, constraints, normalisation)
+│   ├── dhcp_fetal.yaml
+│   ├── dhcp_neo.yaml
+│   └── marsfet_ventriculomegaly.yaml
+├── train/           # training configs (decoder + optimizer + training + pointers to dataset/atlas)
+│   ├── dhcp_fetal.yaml
+│   ├── dhcp_neo.yaml
+│   └── marsfet_ventriculomegaly.yaml
+└── atlas/           # standalone atlas recipes (ages × condition combos)
+    ├── dhcp_fetal.yaml
+    ├── dhcp_neo.yaml
+    └── marsfet_ventriculomegaly.yaml
+```
+
+### Dataset YAML
+
+- `dataset.modalities.intensity` is the list of reconstructed intensity channels; `dataset.modalities.segmentation` is a single optional seg modality (`null` for test subjects that lack GT seg).
+- `conditions` are values consumed by the decoder. Each entry declares a normalisation (`minmax`, `age_relative`, or `identity`) and a `cond_scale`. `use_in_decoder: false` stores a condition in the latent bookkeeping without concatenating it onto the decoder input (typical for `scan_age`, which is handled via latent regression at atlas time).
+- `constraints` filter which subjects are drawn. `sampling: {type: uniform_fillup, priority: K}` yields uniformly-binned sampling along that axis. A condition must also be constrained so its normalisation range is well-defined.
+
+### Train YAML
+
+Holds `decoder`, `optimizer`, `training`, `validation`, `atlas`, and `logging` blocks, plus a `dataset_config:` pointer (relative to the train YAML) and an optional `atlas.recipe:` pointer. See [configs/train/dhcp_fetal.yaml](configs/train/dhcp_fetal.yaml) for a commented reference.
+
+### Atlas recipe
+
+A standalone YAML holding `ages`, `conditions` (Cartesian product across all condition axes), `spacing`, `gaussian_span`, `n_max`, and `mask_reconstruction`. One atlas volume is emitted per `(age × condition-combo)`. `gaussian_span` is in raw condition units (weeks for `scan_age`). `n_max` caps how many nearest training subjects contribute to `mean_latent`.
 
 ## Usage
 
-### Basic Training
-
-To train a CINeMA atlas with default settings:
+All commands are invoked through the `cinema` package module:
 
 ```bash
-python run.py
+python -m cinema <subcommand> [args]
 ```
 
-### Custom Configuration
-
-You can override configuration parameters via command line:
+### Train
 
 ```bash
-python run.py \
-  --config_data dhcp_neo_mm \
-  --seed 123 \
-  --inr_decoder__latent_dim 256 3 3 3 \
-  --inr_decoder__hidden_size 512
+python -m cinema train configs/train/dhcp_fetal.yaml
 ```
 
-### Command Line Arguments
+Override any nested key with repeatable `--set section.key=value` flags. Values are YAML-parsed, so lists, nulls, and numerics just work:
 
-| Argument | Description | Example |
-|----------|-------------|---------|
-| `--config_data` | Dataset configuration name | `dhcp_neo_mm` |
-| `--seed` | Random seed | `42` |
-| `--inr_decoder__out_dim` | Output dimensions | `2 10` |
-| `--inr_decoder__latent_dim` | Latent dimensions | `256 3 3 3` |
-| `--inr_decoder__hidden_size` | Hidden layer size | `1024` |
-| `--atlas_gen__cond_scale` | Condition scaling | `1.0` |
-
-### Training with Different Datasets
-
-For preterm neonates:
 ```bash
-python run.py --config_data dhcp_neo_preterm_mm
+python -m cinema train configs/train/dhcp_fetal.yaml \
+  --set training.epochs=50 \
+  --set decoder.hidden_size=1024 \
+  --set optimizer.lr_inr=2e-4 \
+  --output-dir ./output/dhcp_fetal_run1
 ```
 
-For fetal data:
+The resolved config (including any `--set` overrides) is written to `<output_dir>/config.yaml` at the start of every run.
+
+#### Recommended settings
+
+- **Train full-batch.** Keep `training.batch_size: 0` (= full batch, all training subjects per step). A `batch_size` smaller than the training set samples each gradient step from only a subset of subjects and **measurably degrades reconstruction quality**. If GPU memory is the limit, lower `training.n_samples` (coords per optimizer step) rather than `batch_size`.
+- **Latent-grid resolution drives validation quality.** A larger spatial latent grid — e.g. `decoder.latent_dim: [256, 7, 7, 7]` instead of the `[256, 3, 3, 3]` default — **markedly improves reconstruction of unseen (validation/test) subjects, for both intensity structure and segmentation labels**, at the cost of GPU memory.
+- **Fit the latent grid to the brain.** Set `dataset.world_bbox: auto` to compute a tight (anisotropic) bounding box from the training subjects at run start; it's logged and frozen into the checkpoint. Combine with a length-2 grid `decoder.latent_dim: [channels, max_size]` (e.g. `[256, 9]`), which auto-expands to an anisotropic `[channels, lx, ly, lz]` matching the box's aspect ratio (largest axis → `max_size` cells), concentrating grid resolution where the anatomy is.
+
+Resume from a checkpoint:
 ```bash
-python run.py --config_data dhcp_fetal
+python -m cinema train configs/train/dhcp_fetal.yaml --resume ./output/<run>/checkpoint_final.pt
 ```
 
-## 📁 Output
+### Fit (test-time latent fitting)
 
-After training, the following outputs are generated in the `output/` directory:
+Point a trained checkpoint at a new dataset YAML and fit per-subject latents (+ optional transformations / conditions) with the decoder frozen. Useful for unseen subjects that may not have segmentation ground truth.
 
-```
-output/
-└── {dataset}_{timestamp}_{job_id}/
-    ├── config_atlas.yaml          # Saved atlas configuration
-    ├── config_data.yaml           # Saved data configuration
-    ├── model_epoch_{N}.pth        # Trained model checkpoints
-    ├── {modality1}_ga={min_ga}-{max_ga}_cond={condition_number}_ep={epoch}.nii.gz
-    ├── {modality2}_ga={min_ga}-{max_ga}_cond={condition_number}_ep={epoch}.nii.gz
-    ├── ...
-    ├── certainty_maps/            # Generated certainty maps for each segmentation label if activated in config_atlas.yaml
-    │   ├── ....
-    ├── train/           # Training subject reconstructions of of all modalities with metrics (if GT is available)
-    ├── val/             # Validation subject reconstructions of of all modalities with metrics (if GT is available)
-    ├── hist_scan_age_val/      # Histogram of scan age for validation subjects
-    ├── hist_scan_age_train/    # Histogram of scan age for training subjects
-    └── metrics/                   # Training metrics
+```bash
+python -m cinema fit ./output/<run>/checkpoint_final.pt \
+  --dataset configs/datasets/dhcp_fetal.yaml \
+  --epochs 200 \
+  --split test \
+  --skip-segmentation          # new subjects without seg GT
+  # --fix-conditions           # use TSV-provided conditions instead of learning them
 ```
 
-### Atlas Generation
+### Inference
 
-The framework generates atlases for each temporal value specified in the configuration. Atlases are saved as NIfTI files and can be loaded in standard neuroimaging software.
+Reconstruct every subject from the checkpoint's own dataset:
+
+```bash
+python -m cinema infer ./output/<run>/checkpoint_final.pt \
+  --spacing 0.5 0.5 0.5 \
+  --renormalize-per-modality
+```
+
+### Atlas generation
+
+Generate atlases using the train-config's recipe, or supply an explicit recipe:
+
+```bash
+python -m cinema atlas ./output/<run>/checkpoint_final.pt
+python -m cinema atlas ./output/<run>/checkpoint_final.pt --recipe configs/atlas/dhcp_fetal.yaml
+```
+
+### Evaluation
+
+Reconstruct subjects in the checkpoint's dataset, register to reference NIfTIs with ANTs, and write PSNR / SSIM / Dice into `metrics.json`:
+
+```bash
+python -m cinema evaluate ./output/<run>/checkpoint_final.pt \
+  --refs-tsv ./references.tsv
+```
+
+## Output
+
+Each `train` run writes to `output_dir` (defaults to `./output/<config_stem>_<timestamp>/`):
+
+```
+output_dir/
+├── config.yaml                   # merged + normalised TrainConfig (dataset spec inlined)
+├── checkpoint_final.pt           # final checkpoint (TrainConfig + state dicts, pickled)
+├── checkpoint_epoch_{N}.pt       # periodic checkpoints when training.save_checkpoint_every is set
+└── atlas/                        # created when atlas.enabled: true
+    └── {modality}_age={ga}_cond={idx}.nii.gz
+```
+
+Downstream subcommands write into their own output directories:
+
+- `fit` → `fit_checkpoint.pt`
+- `infer` → one NIfTI per subject-modality
+- `atlas` → `{modality}_age={ga}_cond={idx}.nii.gz`
+- `evaluate` → `metrics.json`
 
 ### Logging
 
-If `logging: True` is set, training progress is logged to Weights & Biases. Make sure to specify your wandb entity in the config_atlas.yaml.
+Set `logging.enabled: true` and provide `wandb_entity` / `project` in the train YAML to stream losses and metrics to Weights & Biases.
 
+## Troubleshooting
 
-## 🔧 Troubleshooting
+### Common issues
 
-### Common Issues
+1. **CUDA out of memory**
+   - Reduce `training.n_samples` (coords per optimizer step) — this is the primary memory lever and does not change batch composition
+   - **Keep full batch** (`training.batch_size: 0`); a smaller batch degrades reconstruction quality, so prefer lowering `n_samples` (and, only if needed, `decoder.latent_dim` / `decoder.hidden_size`) over shrinking the batch
+   - During validation/inference, `predict_volume` auto-scales its chunk size to the latent-grid size, so larger grids do not OOM the reconstruction path
+   - For atlases, reduce the number of ages × condition combos in the recipe or coarsen `spacing`
 
-1. **CUDA Out of Memory**
-   - Reduce `inr_decoder__latent_dim` or `inr_decoder__hidden_size`
-   - Decrease batch size in data loading (might lead to decreased atlas quality)
-   - Decrease `n_samples` parameter for memory usage.
-   - Generating a large number of atlases might lead to GPU and system memory issues. You can specify a smaller range of conditions/temporal steps to generate atlases or use coarser resolution for the atlases. 
+2. **Configuration errors**
+   - Every condition referenced by the decoder must also appear as a constraint (so min/max bounds are defined)
+   - Conditions referenced in the atlas recipe must be declared as `conditions` in the dataset YAML
+   - Subject IDs in the subject-IDs YAML must exist in the dataset TSV
 
-2. **Configuration Errors**
-   - Ensure all required fields are present in YAML files
-   - Check that subject IDs exist in the TSV file
-   - Verify file paths are correct
-   - Verify that all conditions are specified in config_data.yaml and config_atlas.yaml *atlas_gen* section.
+3. **Data loading**
+   - All NIfTI volumes must be 3D and share an affine per subject across modalities
+   - Modalities are declared as `intensity: [...]` plus a single optional `segmentation: <name|null>` — there is no "last entry is segmentation" convention; follow the provided templates
 
-3. **Data Loading Issues**
-   - Ensure NIfTI files are properly formatted (each file should be 3D)
+4. **`fit` against a seg-free dataset**
+   - Use `--skip-segmentation`; the decoder still predicts segmentation logits but they are not used in the loss
 
-
-
-## 📚 Citation
+## Citation
 
 If you use CINeMA in your research, please cite:
 
@@ -197,13 +234,13 @@ If you use CINeMA in your research, please cite:
 @article{dannecker2025cinema,
   title={CINeMA: Conditional Implicit Neural Multi-Modal Atlas for a Spatio-Temporal Representation of the Perinatal Brain},
   author={Dannecker, Maik and Sideri-Lampretsa, Vasiliki and Starck, Sophie and Mihailov, Angeline and Milh, Mathieu and Girard, Nadine and Auzias, Guillaume and Rueckert, Daniel},
-  journal={arXiv preprint arXiv:2506.09668},
-  year={2025}
+  journal={IEEE Transactions on Medical Imaging},
+  year={2025},
+  publisher={IEEE}
 }
 ```
 
-
-## 📄 License
+## License
 
 This project is licensed under the terms specified in the LICENSE file.
 
