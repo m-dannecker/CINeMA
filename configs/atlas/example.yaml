@@ -1,0 +1,27 @@
+# Example atlas recipe (generic template).
+#
+# One atlas volume is emitted per (age x condition-combo); files are named by the
+# actual condition values, e.g. T2w_ExamType_num=-1_GA_MRI=22-34_ep=100.nii.gz.
+
+temporal_condition: GA_MRI                # the age axis the `ages` sweep
+ages: [22, 25, 28, 31, 34]                # should cover the training age range (see constraints.GA_MRI)
+
+# Cartesian product of these defines the condition combos. Every decoder
+# condition (use_in_decoder: true) must be supplied here. Leave empty `{}` for an
+# age-only atlas (only valid when no condition is enabled in the decoder).
+conditions:
+  ExamType_num: [-1.0, 1.0]
+
+spacing: [0.8, 0.8, 0.8]                  # output voxel size (mm)
+mask_reconstruction: true                 # mask each atlas to the largest brain component
+gaussian_span: 1.0                        # width (raw age units) of the latent-averaging kernel
+n_max: 100                                # keep only the N nearest training subjects per age
+
+# Optional: validate the atlas against the training cohort. Fits per-tissue
+# volume-vs-age curves from the training segmentations and overlays this atlas's
+# own measured volumes. Outputs to <output_dir>/atlas/growth_curves/.
+growth_curves:
+  enabled: true
+  group_by: ExamType_num                  # one empirical curve per group value (omit for a single curve)
+  group_labels: {-1.0: GroupA, 1.0: GroupB}
+  kernel_sigma: 2.0                       # smoothing width along the age axis (weeks)

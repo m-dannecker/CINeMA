@@ -8,6 +8,7 @@ CINeMA is a deep learning framework for building conditional implicit neural mul
 
 - **Multi-modal reconstruction**: joint T1w / T2w / segmentation learning from a single decoder
 - **Conditional atlas generation**: continuous atlases conditioned on age and arbitrary numeric covariates
+- **Atlas validation via growth curves**: overlay the generated atlas's own per-tissue volumes on empirical volume-vs-age curves fit from the training cohort, to check anatomical plausibility (e.g. total brain size) at a glance
 - **Resolution-agnostic INR decoder**: SIREN-based MLP + FiLM modulation from per-subject latent grids
 - **Train once, re-fit later**: load a trained checkpoint and fit per-subject latents for new (possibly seg-free) test subjects with the decoder frozen
 - **Typed, versioned configs**: dataclass-backed YAML configs with explicit dataset / train / atlas separation and `--set` overrides
@@ -24,6 +25,7 @@ Pre-computed temporal atlases modeling neurotypical fetal and neonatal brain dev
 - [Usage](#usage)
 - [Output](#output)
 - [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
 - [Citation](#citation)
 
 ## Installation
@@ -55,17 +57,17 @@ pip install -r requirements.txt
 
 ### Supported datasets
 
-CINeMA has been validated on the dHCP (developing Human Connectome Project) neonatal and fetal cohorts, and on an in-house fetal cohort with pathology labels (e.g. agenesis of the corpus callosum). Any new dataset needs:
+CINeMA has been validated on the dHCP (developing Human Connectome Project) neonatal and fetal cohorts, and on an in-house fetal cohort with pathology labels (e.g. ventriculomegaly, agenesis of the corpus callosum). Any new dataset needs:
 
-- **TSV file** — metadata + NIfTI paths per subject. Must include every value you want to either condition on or constrain sampling by.
-- **Subject-IDs YAML** — maps split names (`train`, `val`, optional `test`) to lists of subject IDs referenced in the TSV.
+- **Subjects table (CSV or TSV)** — metadata + NIfTI paths per subject. Must include every value you want to either condition on or constrain sampling by. `.csv` is read as comma-separated (Excel-friendly), `.tsv` as tab-separated.
+- **Subject-IDs YAML** — maps split names (`train`, `val`, optional `test`) to lists of subject IDs referenced in the subjects table.
 - **Dataset YAML** — declares modalities, conditions, constraints, and normalisation spans. Templates live under [configs/datasets/](configs/datasets/).
 
 ### Preprocessing expectations
 
 - All volumes in NIfTI format, roughly in the same orientation.
 - No resampling required — INRs operate directly on the subject's voxel grid, so heterogeneous resolutions and spacings are fine.
-- Conditionable properties (e.g. ventricular volume) must be pre-extracted and written into the TSV.
+- Conditionable properties (e.g. ventricular volume) must be pre-extracted and written into the subjects table.
 - Fine rigid / rigid+scale registration is learned by the model (`decoder.tf_dim: 6` or `9`); no prior atlas is needed.
 
 ## Configuration
@@ -75,18 +77,16 @@ CINeMA 2 splits configs into three layered YAMLs — this replaces the legacy mo
 ```
 configs/
 ├── datasets/        # dataset specs (modalities, conditions, constraints, normalisation)
-│   ├── dhcp_fetal.yaml
-│   ├── dhcp_neo.yaml
-│   └── marsfet_ventriculomegaly.yaml
+│   └── example.yaml
 ├── train/           # training configs (decoder + optimizer + training + pointers to dataset/atlas)
-│   ├── dhcp_fetal.yaml
-│   ├── dhcp_neo.yaml
-│   └── marsfet_ventriculomegaly.yaml
-└── atlas/           # standalone atlas recipes (ages × condition combos)
-    ├── dhcp_fetal.yaml
-    ├── dhcp_neo.yaml
-    └── marsfet_ventriculomegaly.yaml
+│   └── example.yaml
+├── atlas/           # standalone atlas recipes (ages × condition combos)
+│   └── example.yaml
+├── GenericSubjectsTable.csv   # subjects-table template (header only — add your own rows)
+└── example_subject_ids.yaml   # split definition template (train/val/test ID lists)
 ```
+
+The `example` configs are a self-contained, commented template — copy and adapt them to your own dataset. They are syntactically valid but ship with a header-only table, so they document the workflow rather than run as-is.
 
 ### Dataset YAML
 
@@ -96,11 +96,11 @@ configs/
 
 ### Train YAML
 
-Holds `decoder`, `optimizer`, `training`, `validation`, `atlas`, and `logging` blocks, plus a `dataset_config:` pointer (relative to the train YAML) and an optional `atlas.recipe:` pointer. See [configs/train/dhcp_fetal.yaml](configs/train/dhcp_fetal.yaml) for a commented reference.
+Holds `decoder`, `optimizer`, `training`, `validation`, `atlas`, and `logging` blocks, plus a `dataset_config:` pointer (relative to the train YAML) and an optional `atlas.recipe:` pointer. See [configs/train/example.yaml](configs/train/example.yaml) for a commented reference.
 
 ### Atlas recipe
 
-A standalone YAML holding `ages`, `conditions` (Cartesian product across all condition axes), `spacing`, `gaussian_span`, `n_max`, and `mask_reconstruction`. One atlas volume is emitted per `(age × condition-combo)`. `gaussian_span` is in raw condition units (weeks for `scan_age`). `n_max` caps how many nearest training subjects contribute to `mean_latent`.
+A standalone YAML holding `ages`, `conditions` (Cartesian product across all condition axes), `spacing`, `gaussian_span`, `n_max`, and `mask_reconstruction`. One atlas volume is emitted per `(age × condition-combo)`, named by the **actual condition values** (e.g. `T2w_ExamType_num=-1.0_GA_MRI=25-26_ep=5.nii.gz`; age-only atlases fall back to `cond=0`). `gaussian_span` is in raw condition units (weeks for `scan_age`). `n_max` caps how many nearest training subjects contribute to `mean_latent`. An optional `growth_curves:` block enables atlas validation (see [Atlas validation](#atlas-validation-growth-curves)).
 
 ## Usage
 
@@ -113,17 +113,17 @@ python -m cinema <subcommand> [args]
 ### Train
 
 ```bash
-python -m cinema train configs/train/dhcp_fetal.yaml
+python -m cinema train configs/train/example.yaml
 ```
 
 Override any nested key with repeatable `--set section.key=value` flags. Values are YAML-parsed, so lists, nulls, and numerics just work:
 
 ```bash
-python -m cinema train configs/train/dhcp_fetal.yaml \
+python -m cinema train configs/train/example.yaml \
   --set training.epochs=50 \
   --set decoder.hidden_size=1024 \
   --set optimizer.lr_inr=2e-4 \
-  --output-dir ./output/dhcp_fetal_run1
+  --output-dir ./output/example_run1
 ```
 
 The resolved config (including any `--set` overrides) is written to `<output_dir>/config.yaml` at the start of every run.
@@ -132,11 +132,11 @@ The resolved config (including any `--set` overrides) is written to `<output_dir
 
 - **Train full-batch.** Keep `training.batch_size: 0` (= full batch, all training subjects per step). A `batch_size` smaller than the training set samples each gradient step from only a subset of subjects and **measurably degrades reconstruction quality**. If GPU memory is the limit, lower `training.n_samples` (coords per optimizer step) rather than `batch_size`.
 - **Latent-grid resolution drives validation quality.** A larger spatial latent grid — e.g. `decoder.latent_dim: [256, 7, 7, 7]` instead of the `[256, 3, 3, 3]` default — **markedly improves reconstruction of unseen (validation/test) subjects, for both intensity structure and segmentation labels**, at the cost of GPU memory.
-- **Fit the latent grid to the brain.** Set `dataset.world_bbox: auto` to compute a tight (anisotropic) bounding box from the training subjects at run start; it's logged and frozen into the checkpoint. Combine with a length-2 grid `decoder.latent_dim: [channels, max_size]` (e.g. `[256, 9]`), which auto-expands to an anisotropic `[channels, lx, ly, lz]` matching the box's aspect ratio (largest axis → `max_size` cells), concentrating grid resolution where the anatomy is.
+- **Fit the latent grid to the brain.** Set `dataset.world_bbox: auto` to compute a tight (anisotropic) bounding box from the actual training subjects at run start — a fixed 155 mm box wastes ~75–85% of the grid on empty space around the brain. The resolved box is logged and frozen into the checkpoint. Combine with a length-2 grid `decoder.latent_dim: [channels, max_size]` (e.g. `[256, 9]`): it auto-expands to an anisotropic `[channels, lx, ly, lz]` matching the box's aspect ratio (largest axis → `max_size` cells), so the grid concentrates resolution where the anatomy is.
 
 Resume from a checkpoint:
 ```bash
-python -m cinema train configs/train/dhcp_fetal.yaml --resume ./output/<run>/checkpoint_final.pt
+python -m cinema train configs/train/example.yaml --resume ./output/<run>/checkpoint_final.pt
 ```
 
 ### Fit (test-time latent fitting)
@@ -145,7 +145,7 @@ Point a trained checkpoint at a new dataset YAML and fit per-subject latents (+ 
 
 ```bash
 python -m cinema fit ./output/<run>/checkpoint_final.pt \
-  --dataset configs/datasets/dhcp_fetal.yaml \
+  --dataset configs/datasets/example.yaml \
   --epochs 200 \
   --split test \
   --skip-segmentation          # new subjects without seg GT
@@ -168,8 +168,34 @@ Generate atlases using the train-config's recipe, or supply an explicit recipe:
 
 ```bash
 python -m cinema atlas ./output/<run>/checkpoint_final.pt
-python -m cinema atlas ./output/<run>/checkpoint_final.pt --recipe configs/atlas/dhcp_fetal.yaml
+python -m cinema atlas ./output/<run>/checkpoint_final.pt --recipe configs/atlas/example.yaml
 ```
+
+### Atlas validation (growth curves)
+
+To sanity-check that an atlas is anatomically plausible (does its total brain volume, CSF, WM, … track the real cohort at each age?), add a `growth_curves:` block to the atlas recipe. During atlas generation CINeMA then measures per-tissue volumes from the **training** segmentations, fits mean ± SD volume-vs-age curves, and overlays the atlas's **own** measured volumes (one marker series per condition value):
+
+```yaml
+# in configs/atlas/<dataset>.yaml
+growth_curves:
+  enabled: true
+  group_by: ExamType_num                       # optional: one curve per value of a
+                                               # categorical condition (omit for a
+                                               # single curve, e.g. a continuous sweep)
+  group_labels: {-1.0: PRE_OP, 1.0: POST_OP}   # optional display names
+  tissues: [TotalBrain, CSF, WM, cGM]          # optional; default = all foreground labels + TotalBrain
+  kernel_sigma: 2.0                            # smoothing width along the age axis (weeks)
+```
+
+This runs automatically at the end of `train` (when `atlas.enabled`) and `atlas`, writing to `<output_dir>/atlas/growth_curves/`:
+
+- `curve_<tissue>.png` — empirical mean ± SD band + per-subject scatter, with atlas markers labelled by condition value
+- `tissue_volumes.csv` — per-training-subject volumes (mm³); `atlas_volumes.csv` — per atlas frame
+- `growth_curves_reference.json` — the fitted curves (age grid, μ, σ) per tissue/group
+
+The volumes use the dataset's `segmentation_classes.label_names` as the tissue→label map, and `TotalBrain` is the sum of all foreground labels.
+
+The same plots can be produced ad-hoc (and against an external reference cohort) with `scripts/tissue_growth_curves.py`; the two-step `scripts/extract_lv_condition.py` → `scripts/compute_lv_zscore.py` pipeline shows how to derive a conditioning column (lateral-ventricle z-score) from segmentations.
 
 ### Evaluation
 
@@ -190,14 +216,19 @@ output_dir/
 ├── checkpoint_final.pt           # final checkpoint (TrainConfig + state dicts, pickled)
 ├── checkpoint_epoch_{N}.pt       # periodic checkpoints when training.save_checkpoint_every is set
 └── atlas/                        # created when atlas.enabled: true
-    └── {modality}_age={ga}_cond={idx}.nii.gz
+    ├── {modality}_{cond}={val}_{temporal}={age-range}_ep={epoch}.nii.gz
+    ├── ages.json                  # ordered age list for the stacked 4D time axis
+    └── growth_curves/             # created when recipe growth_curves.enabled: true
+        ├── curve_{tissue}.png
+        ├── tissue_volumes.csv / atlas_volumes.csv
+        └── growth_curves_reference.json
 ```
 
-Downstream subcommands write into their own output directories:
+One 4D NIfTI is written per `(modality × condition-combo)`, with `ages` stacked along the trailing axis (scrub through it in ITK-SNAP / fsleyes). Downstream subcommands write into their own output directories:
 
 - `fit` → `fit_checkpoint.pt`
 - `infer` → one NIfTI per subject-modality
-- `atlas` → `{modality}_age={ga}_cond={idx}.nii.gz`
+- `atlas` → `{modality}_{cond}={val}_{temporal}={age-range}_ep={epoch}.nii.gz` (+ optional `growth_curves/`)
 - `evaluate` → `metrics.json`
 
 ### Logging
@@ -217,7 +248,7 @@ Set `logging.enabled: true` and provide `wandb_entity` / `project` in the train 
 2. **Configuration errors**
    - Every condition referenced by the decoder must also appear as a constraint (so min/max bounds are defined)
    - Conditions referenced in the atlas recipe must be declared as `conditions` in the dataset YAML
-   - Subject IDs in the subject-IDs YAML must exist in the dataset TSV
+   - Subject IDs in the subject-IDs YAML must exist in the dataset's subjects table
 
 3. **Data loading**
    - All NIfTI volumes must be 3D and share an affine per subject across modalities
@@ -225,6 +256,17 @@ Set `logging.enabled: true` and provide `wandb_entity` / `project` in the train 
 
 4. **`fit` against a seg-free dataset**
    - Use `--skip-segmentation`; the decoder still predicts segmentation logits but they are not used in the loss
+
+5. **Hallucinations / unclean background outside the brain**
+   - The reconstruction is masked to the largest connected segmentation component. For this to work the decoder must learn a background label — supervised by a thin background "halo" ring the data pipeline paints around the brain. That halo class **must have a non-zero `class_weights` entry**, or the decoder never learns background and predicts tissue everywhere outside (CINeMA prints a loud warning at dataset build if this is misconfigured). dHCP uses a dedicated `BG` class; datasets without one (the halo falls back to label 0) must give label 0 a non-zero weight.
+   - For lower-quality segmentations where thin "bridges" keep hallucinations attached to the brain, raise `training.mask_open_radius` (a morphological opening, in voxels, applied before component selection) and/or `training.mask_halo_width` (wider background supervision; needs retraining).
+   - `training.intensity_floor` zeros a faint background haze (and strips the corresponding seg) below a threshold before masking — keep it under the darkest real tissue (e.g. `0.05`).
+
+## Known limitations
+
+Open modelling limitations include validation/test reconstruction sharpness on
+unseen subjects and the full-batch training requirement (gradient accumulation
+for very large cohorts within bounded host memory is currently unimplemented).
 
 ## Citation
 

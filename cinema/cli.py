@@ -156,6 +156,7 @@ def _build_dataset(
         seed=cfg.seed,
         skip_segmentation=skip_segmentation,
         mask_intensities_by_segmentation=mask_intensities,
+        mask_halo_width=getattr(cfg.training, "mask_halo_width", 1.5),
         augmentation=augmentation,
     )
 
@@ -366,6 +367,8 @@ def _run_validation(
                 recon, affine = reconstruct_subject(
                     fit_state, i, spacing=spacing,
                     mask_reconstruction=cfg.training.mask_reconstruction,
+                    mask_open_radius=getattr(cfg.training, "mask_open_radius", 0),
+                    intensity_floor=getattr(cfg.training, "intensity_floor", 0.0),
                 )
                 if val_cfg.save_imgs:
                     save_reconstruction(
@@ -651,6 +654,8 @@ def _cmd_train(args: argparse.Namespace) -> int:
             state, cfg.atlas.recipe,
             output_dir=out, epoch=n_epochs,
             temporal_condition=cfg.atlas.recipe.temporal_condition,
+            mask_open_radius=getattr(cfg.training, "mask_open_radius", 0),
+            intensity_floor=getattr(cfg.training, "intensity_floor", 0.0),
         )
         _log(
             f"wrote {len(written)} atlas file(s) to {out / 'atlas'} "
@@ -752,8 +757,8 @@ def _cmd_fit(args: argparse.Namespace) -> int:
 
 
 def _read_tsv(cfg: TrainConfig) -> "pd.DataFrame":
-    import pandas as pd
-    return pd.read_csv(cfg.dataset_spec.tsv_file, sep="\t")
+    from .data import read_subjects_table
+    return read_subjects_table(cfg.dataset_spec.tsv_file)
 
 
 # === infer ===
@@ -800,6 +805,8 @@ def _cmd_infer(args: argparse.Namespace) -> int:
             state, i, spacing=spacing,
             renormalize_per_modality=args.renormalize_per_modality,
             mask_reconstruction=mask_reconstruction,
+            mask_open_radius=getattr(cfg.training, "mask_open_radius", 0),
+            intensity_floor=getattr(cfg.training, "intensity_floor", 0.0),
         )
         sid = str(dataset.df.iloc[i]["subject_id"])
         files = save_reconstruction(
@@ -932,6 +939,8 @@ def _cmd_atlas(args: argparse.Namespace) -> int:
         temporal_condition=args.temporal_condition or recipe.temporal_condition,
         epoch=ckpt.epoch,
         renormalize_per_modality=args.renormalize_per_modality,
+        mask_open_radius=getattr(cfg.training, "mask_open_radius", 0),
+        intensity_floor=getattr(cfg.training, "intensity_floor", 0.0),
     )
     _log(
         f"wrote {len(written)} atlas file(s) to {out / 'atlas'} "
@@ -957,8 +966,10 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     if args.device:
         cfg.device = args.device
 
+    from .data import read_subjects_table
+
     refs_tsv = args.refs_tsv or cfg.dataset_spec.tsv_file
-    refs = pd.read_csv(refs_tsv, sep="\t")
+    refs = read_subjects_table(refs_tsv)
     refs = refs.set_index("subject_id")
     _log(f"loaded refs tsv: {len(refs)} subject rows from {refs_tsv}")
 
@@ -997,6 +1008,8 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         recon, affine = reconstruct_subject(
             state, i, spacing=spacing,
             mask_reconstruction=mask_reconstruction,
+            mask_open_radius=getattr(cfg.training, "mask_open_radius", 0),
+            intensity_floor=getattr(cfg.training, "intensity_floor", 0.0),
         )
         ref_paths = {
             mod: str(refs.loc[sid, mod])

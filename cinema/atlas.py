@@ -35,8 +35,13 @@ import nibabel as nib
 import numpy as np
 import torch
 
+from .conditioning import AgeRelativeNormalization
 from .config import AtlasRecipe
-from .evaluator import apply_largest_component_mask, generate_world_grid
+from .evaluator import (
+    apply_intensity_floor,
+    apply_largest_component_mask,
+    generate_world_grid,
+)
 from .state import TrainState
 
 
@@ -109,6 +114,8 @@ def generate_atlas(
     epoch: int = 0,
     renormalize_per_modality: bool = False,
     step_size: int = 100_000,
+    mask_open_radius: int = 0,
+    intensity_floor: float = 0.0,
 ) -> list[Path]:
     """Generate all atlases in ``recipe`` and write them to ``output_dir/atlas/``.
 
@@ -169,12 +176,15 @@ def generate_atlas(
                     step_size=step_size,
                     renormalize_per_modality=renormalize_per_modality,
                 )
+                recon = apply_intensity_floor(recon, intensity_floor)
                 if (
                     recipe.mask_reconstruction
                     and recon.seg_hard is not None
                     and spec.label_names is not None
                 ):
-                    recon = apply_largest_component_mask(recon, spec.label_names)
+                    recon = apply_largest_component_mask(
+                        recon, spec.label_names, open_radius=mask_open_radius,
+                    )
                 intensity_frames[combo_idx].append(
                     recon.intensities.detach().cpu().numpy().astype(np.float32)
                 )
@@ -191,6 +201,7 @@ def generate_atlas(
             grid_affine,
             atlas_root,
             ages=list(recipe.ages),
+            combo=combos[combo_idx],
             combo_idx=combo_idx,
             epoch=epoch,
             intensity_modalities=spec.intensity_modalities,
@@ -200,6 +211,27 @@ def generate_atlas(
 
     ages_sidecar = atlas_root / "ages.json"
     ages_sidecar.write_text(json.dumps(list(recipe.ages), indent=2))
+
+    # Optional tissue growth-curve overlay (validation against training data).
+    # The atlas files are already written above, so a plotting hiccup here must
+    # not lose them — log and continue.
+    gc = getattr(recipe, "growth_curves", None)
+    if gc is not None and gc.enabled:
+        import traceback
+
+        from .growth_curves import generate_growth_curves
+        try:
+            written.extend(generate_growth_curves(
+                state, recipe,
+                temporal_condition=temporal_condition,
+                output_dir=output_dir,
+                combos=combos,
+                seg_frames=seg_frames,
+                epoch=epoch,
+            ))
+        except Exception:
+            print("[growth_curves] generation failed:\n" + traceback.format_exc())
+
     return written
 
 
@@ -221,6 +253,18 @@ def _condition_combinations(
     return [dict(zip(keys, vals)) for vals in product(*lists)]
 
 
+def combo_tag(combo: dict, combo_idx: int = 0, sep: str = "_") -> str:
+    """Readable tag for a condition combination, e.g. ``ExamType_num=-1.5``.
+
+    Used for atlas filenames (``sep="_"``) and growth-curve marker labels
+    (``sep=", "``). Falls back to ``cond=<i>`` for an empty (age-only) combo so
+    files stay distinguishable.
+    """
+    if not combo:
+        return f"cond={combo_idx}"
+    return sep.join(f"{k}={v:g}" for k, v in combo.items())
+
+
 def _build_cond_vector(
     enabled_specs: Sequence, temporal_condition: str,
     age: float, combo: dict, context: dict, device: str,
@@ -228,15 +272,22 @@ def _build_cond_vector(
     vec: list[float] = []
     for spec in enabled_specs:
         if spec.name == temporal_condition:
-            raw = age
+            vec.append(float(spec.normalize(age, context=context)))
         elif spec.name in combo:
-            raw = combo[spec.name]
+            value = combo[spec.name]
+            # For age-relative conditions the recipe supplies a z-score (sigma
+            # units, age-invariant) rather than a raw physical value, since the
+            # raw value's meaning drifts with age. Everything else is raw units.
+            if isinstance(spec.normalization, AgeRelativeNormalization):
+                code = float(spec.normalization.from_z(value)) * spec.cond_scale
+            else:
+                code = float(spec.normalize(value, context=context))
+            vec.append(code)
         else:
             raise ValueError(
                 f"atlas recipe does not supply a value for decoder condition "
                 f"{spec.name!r} — add it under recipe.conditions"
             )
-        vec.append(float(spec.normalize(raw, context=context)))
     return torch.tensor(vec, dtype=torch.float32, device=device)
 
 
@@ -247,6 +298,7 @@ def _save_atlas_combo(
     atlas_root: Path,
     *,
     ages: list[float],
+    combo: dict,
     combo_idx: int,
     epoch: int,
     intensity_modalities: Sequence[str],
@@ -259,6 +311,7 @@ def _save_atlas_combo(
         affine_np = np.asarray(affine, dtype=np.float64)
     written: list[Path] = []
     age_range = f"{min(ages):g}-{max(ages):g}" if len(ages) > 1 else f"{ages[0]:g}"
+    tag = combo_tag(combo, combo_idx, sep="_")  # e.g. ExamType_num=-1.5
 
     # intensity_per_age[t] has shape (X, Y, Z, C_int). Stack along new trailing
     # time axis → (X, Y, Z, C_int, T), then per-modality → (X, Y, Z, T).
@@ -266,7 +319,7 @@ def _save_atlas_combo(
     for c, mod in enumerate(intensity_modalities):
         vol_4d = np.ascontiguousarray(stacked_int[..., c, :])
         path = atlas_root / (
-            f"{mod}_cond={combo_idx}_{temporal_condition}={age_range}_ep={epoch}.nii.gz"
+            f"{mod}_{tag}_{temporal_condition}={age_range}_ep={epoch}.nii.gz"
         )
         nib.save(nib.Nifti1Image(vol_4d, affine_np), str(path))
         written.append(path)
@@ -274,7 +327,7 @@ def _save_atlas_combo(
     if segmentation_modality is not None and seg_per_age:
         stacked_seg = np.stack(seg_per_age, axis=-1)  # (X, Y, Z, T)
         path = atlas_root / (
-            f"{segmentation_modality}_cond={combo_idx}"
+            f"{segmentation_modality}_{tag}"
             f"_{temporal_condition}={age_range}_ep={epoch}.nii.gz"
         )
         nib.save(nib.Nifti1Image(stacked_seg, affine_np), str(path))

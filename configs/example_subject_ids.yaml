@@ -1,0 +1,17 @@
+# Example split definition (generic template).
+#
+# Keyed by dataset `name` (must match datasets/example.yaml) -> subject_ids -> split.
+# These lists are the ONLY thing holding the splits disjoint: every ID must exist
+# in the subjects table's `subject_id` column. Splits must not overlap. Required
+# and fail-closed — a missing entry or empty list is an error, not a fallback.
+
+example:
+  subject_ids:
+    train:
+      - sub-0001
+      - sub-0002
+      - sub-0003
+    val:
+      - sub-0101
+    test:
+      - sub-0201

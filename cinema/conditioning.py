@@ -30,6 +30,26 @@ import numpy as np
 import pandas as pd
 
 
+def kernel_regress(ages, vals, kernel_sigma, n_grid: int = 200):
+    """Gaussian-kernel regression of ``mu(x)`` and ``sigma(x)`` over an x grid.
+
+    Returns ``(grid, mu, sd)`` with ``grid`` spanning ``[min, max]`` of ``ages``.
+    Inputs must be finite and length >= 1; callers handle their own NaN-masking
+    and minimum-count checks. This is the shared implementation behind
+    ``AgeRelativeNormalization.fit`` and the growth-curve module.
+    """
+    ages = np.asarray(ages, dtype=np.float64)
+    vals = np.asarray(vals, dtype=np.float64)
+    grid = np.linspace(ages.min(), ages.max(), n_grid)
+    diffs = (ages[None, :] - grid[:, None]) / float(kernel_sigma)
+    w = np.exp(-0.5 * diffs * diffs)
+    w = w / np.clip(w.sum(axis=1, keepdims=True), 1e-12, None)
+    mu = (w * vals[None, :]).sum(axis=1)
+    var = (w * (vals[None, :] - mu[:, None]) ** 2).sum(axis=1)
+    sd = np.sqrt(var + 1e-8)
+    return grid, mu, sd
+
+
 _NORM_TYPES: dict[str, type["Normalization"]] = {}
 
 
@@ -161,14 +181,7 @@ class AgeRelativeNormalization(Normalization):
                 f"age_relative normalization needs >=2 non-NaN training rows with "
                 f"both '{self.age_key}' and '{column_name}'; got {ages.size}."
             )
-        grid = np.linspace(ages.min(), ages.max(), 200)
-        sigma_k = float(self.kernel_sigma_weeks)
-        diffs = (ages[None, :] - grid[:, None]) / sigma_k
-        w = np.exp(-0.5 * diffs * diffs)
-        w = w / np.clip(w.sum(axis=1, keepdims=True), 1e-12, None)
-        mu = (w * vals[None, :]).sum(axis=1)
-        var = (w * (vals[None, :] - mu[:, None]) ** 2).sum(axis=1)
-        sd = np.sqrt(var + 1e-8)
+        grid, mu, sd = kernel_regress(ages, vals, self.kernel_sigma_weeks)
         self._age_grid = grid
         self._mu_grid = mu
         self._sigma_grid = sd
@@ -204,6 +217,16 @@ class AgeRelativeNormalization(Normalization):
         z = np.arctanh(v) * self.clip_sigmas
         return z * sigma + mu
 
+    def from_z(self, z):
+        """Map a z-score (in sigma units) directly to the ``[-1, 1]`` code.
+
+        This is the age-invariant counterpart to ``normalize``: a given z maps
+        to a fixed code regardless of age (the ``mu(age)``/``sigma(age)`` lookup
+        cancels), which makes the z-score the natural knob for atlas generation.
+        Requires no age context.
+        """
+        return np.tanh(np.asarray(z, dtype=np.float64) / self.clip_sigmas)
+
     def _payload(self):
         d: dict = {
             "age_key": self.age_key,
@@ -231,6 +254,44 @@ class AgeRelativeNormalization(Normalization):
             obj._mu_grid = np.asarray(f["mu_grid"], dtype=np.float64)
             obj._sigma_grid = np.asarray(f["sigma_grid"], dtype=np.float64)
         return obj
+
+
+@_register_norm("zscore")
+@dataclass(eq=False)
+class ZScoreNormalization(Normalization):
+    """Parameter-free squash of a *precomputed* z-score to ``(-1, 1)``.
+
+    The conditioned column already holds a z-score (sigma units) computed
+    offline against a fixed normative reference — see
+    ``scripts/compute_lv_zscore.py``, which fits per-cohort ``mu(age)``/
+    ``sigma(age)`` on the full cohort and writes both the ``*_z`` column and a
+    JSON reference artifact. This strategy just bounds it via
+    ``tanh(z / clip_sigmas)``: no fit, no age context needed.
+
+    It is mathematically identical to ``AgeRelativeNormalization.from_z``, but
+    moves the reference out of the per-split, per-checkpoint kernel fit and into
+    an external, inspectable, reproducible artifact. Prefer this whenever the
+    z-score can be precomputed.
+    """
+
+    clip_sigmas: float = 3.0
+
+    def fit(self, column_name, df):
+        return  # nothing to fit — the z-score is already in the column
+
+    def normalize(self, value, context=None):
+        return np.tanh(np.asarray(value, dtype=np.float64) / self.clip_sigmas)
+
+    def denormalize(self, normed, context=None):
+        v = np.clip(normed, -1.0 + 1e-6, 1.0 - 1e-6)
+        return np.arctanh(v) * self.clip_sigmas
+
+    def _payload(self):
+        return {"clip_sigmas": float(self.clip_sigmas)}
+
+    @classmethod
+    def _from_payload(cls, d):
+        return cls(clip_sigmas=float(d.get("clip_sigmas", 3.0)))
 
 
 @dataclass

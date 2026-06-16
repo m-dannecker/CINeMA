@@ -1,0 +1,49 @@
+# Example dataset config (generic template).
+#
+# One T2w intensity modality + a segmentation, conditioned on gestational age
+# (GA_MRI, the atlas/temporal axis) and a binary group covariate (ExamType_num).
+# Point `tsv_file` at your own subjects table and fill in `subject_ids`.
+# Every column referenced below must exist in the subjects table.
+
+dataset:
+  name: example
+  tsv_file: ../GenericSubjectsTable.csv        # .csv or .tsv; one row per scan
+  subject_ids: ../example_subject_ids.yaml     # required: train/val/test ID lists per dataset name
+  modalities:
+    intensity: [T2w]                           # column(s) with NIfTI paths
+    segmentation: Seg                          # column with the label-map path (or null)
+  world_bbox: auto                             # tight bounding box from the actual training subjects
+  normalize_intensities: minmax
+  segmentation_classes:
+    # index i corresponds to label value i in the Seg files; label 0 is background.
+    label_names: [Background, CSF, GM, WM, Ventricles, Cerebellum, DeepGM, Brainstem]
+    # IMPORTANT: when `training.mask_reconstruction` is on, the background class
+    # MUST have a non-zero weight. It is supervised via a halo ring the pipeline
+    # paints around the brain; a zero weight means the decoder never learns
+    # "outside brain = background" and predicts tissue everywhere outside.
+    class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+# Conditions are fed to the decoder (if `use_in_decoder`) in physical units; the
+# registry owns normalization. `cond_scale` sets the channel amplitude.
+conditions:
+  GA_MRI:                                      # the temporal axis the atlas sweeps
+    unit: weeks
+    use_in_decoder: false
+    cond_scale: 0.1
+    normalization: {type: minmax, min: 20, max: 35}
+  ExamType_num:                                # a covariate to condition on (e.g. -1 / +1)
+    unit: score
+    use_in_decoder: true
+    cond_scale: 0.2
+    normalization: {type: minmax, min: -1.0, max: 1.0}
+
+# Constraints filter rows and drive balanced sampling (independent of conditions).
+constraints:
+  GA_MRI:
+    min: 20
+    max: 35
+    sampling: {type: uniform_fillup, priority: 10}
+  rating_svr:                                  # keep only acceptable-quality reconstructions
+    values: [1, 2]
+  ExamType_num:
+    values: [-1.0, 1.0]

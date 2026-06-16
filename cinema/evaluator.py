@@ -29,18 +29,51 @@ from .models.inr_decoder import VolumeReconstruction, mask_by_largest_component
 from .state import TrainState
 
 
+def apply_intensity_floor(
+    recon: VolumeReconstruction, floor: float,
+) -> VolumeReconstruction:
+    """Round a faint background haze to exactly zero.
+
+    The decoder emits a small non-zero intensity (~0.02) outside the brain.
+    Voxels whose brightest intensity channel is below ``floor`` get their
+    intensity zeroed *and* their hard-seg label reset to background (0), so that
+    faint hallucinations are stripped from the segmentation *before*
+    largest-connected-component masking and can no longer bridge the brain to
+    spurious blobs. Choose ``floor`` below the darkest real tissue (e.g. ~0.05
+    for min-max-normalised intensities, where dark brain is rarely < 0.1).
+    No-op when ``floor <= 0`` or there are no intensities.
+    """
+    if floor <= 0 or recon.intensities is None:
+        return recon
+    inten = recon.intensities.clone()
+    low = inten.amax(dim=-1) < floor             # (X, Y, Z): darkest-channel test
+    inten[low] = 0.0
+    seg_hard = recon.seg_hard
+    if seg_hard is not None:
+        seg_hard = seg_hard.clone()
+        seg_hard[low] = 0
+    return VolumeReconstruction(
+        intensities=inten, seg_hard=seg_hard, seg_soft=recon.seg_soft,
+    )
+
+
 def apply_largest_component_mask(
     recon: VolumeReconstruction, label_names: Sequence[str],
+    *, open_radius: int = 0, halo_sigma: float = 1.0,
 ) -> VolumeReconstruction:
     """Zero intensities + seg outside the largest connected foreground component.
 
     Uses ``mask_by_largest_component`` on the hard seg; intensities are masked
     channel-wise and the seg map is re-multiplied by the same mask. Soft seg
     logits are left untouched. No-op if the reconstruction has no seg map.
+    ``open_radius`` applies a morphological opening to sever bridges (see
+    ``mask_by_largest_component``).
     """
     if recon.seg_hard is None:
         return recon
-    mask = mask_by_largest_component(recon.seg_hard, label_names)
+    mask = mask_by_largest_component(
+        recon.seg_hard, label_names, halo_sigma=halo_sigma, open_radius=open_radius,
+    )
     intensities = recon.intensities * mask.unsqueeze(-1)
     seg_hard = recon.seg_hard * mask.to(recon.seg_hard.dtype)
     return VolumeReconstruction(
@@ -94,6 +127,8 @@ def reconstruct_subject(
     step_size: int = 100_000,
     renormalize_per_modality: bool = False,
     mask_reconstruction: bool = False,
+    mask_open_radius: int = 0,
+    intensity_floor: float = 0.0,
 ) -> tuple[VolumeReconstruction, torch.Tensor]:
     """Reconstruct subject ``idx`` on a regular grid.
 
@@ -140,12 +175,15 @@ def reconstruct_subject(
             step_size=step_size,
             renormalize_per_modality=renormalize_per_modality,
         )
+        recon = apply_intensity_floor(recon, intensity_floor)
         if (
             mask_reconstruction
             and recon.seg_hard is not None
             and spec.label_names is not None
         ):
-            recon = apply_largest_component_mask(recon, spec.label_names)
+            recon = apply_largest_component_mask(
+                recon, spec.label_names, open_radius=mask_open_radius,
+            )
     return recon, affine
 
 

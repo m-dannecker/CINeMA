@@ -1,0 +1,58 @@
+# Example training config (generic template).
+#
+# Points at one dataset YAML and one atlas recipe. Override any nested key on the
+# command line, e.g.:
+#   python -m cinema train configs/train/example.yaml --set training.epochs=200
+
+dataset_config: ../datasets/example.yaml
+
+output_dir: ./output/example
+device: cuda
+amp: true
+seed: 42
+
+decoder:
+  tf_dim: 6                  # per-subject pose: 0 = off, 6 = rigid, 9 = + scaling
+  cnn_kernel_size: 0         # 0 disables the spatial-modulator CNN
+  latent_dim: [256, 7]       # [channels, max grid cells]; auto-expands to the world_bbox aspect ratio.
+                             # Larger grids markedly improve val/test quality at the cost of GPU memory.
+  in_dim: 3
+  out_dim: [1, 8]            # [intensity channels..., n segmentation classes] — last entry == len(label_names)
+  hidden_size: 1024
+  num_hidden_layers: 5
+  modulated_layers: [1, 3, 5]
+  omega: [30, 30]
+
+optimizer:
+  lr_inr: 1.0e-4
+  lr_latent: 5.0e-4
+  lr_tf: 7.5e-3
+  loss_metric: l1
+  seg_weight: 1.0
+  scheduler: {type: cosine, eta_min: 2.5e-5}
+
+training:
+  epochs: 100
+  validate_every: 20
+  batch_size: 0              # 0 = full batch (recommended); a smaller batch degrades quality.
+  n_samples: 20000          # coords per optimizer step — lower this for GPU memory, not batch_size.
+  num_workers: 0
+  mask_reconstruction: true  # mask output to the brain (requires a non-zero background weight, see dataset)
+  # mask_open_radius: 1      # uncomment for lower-quality segs: severs thin hallucination "bridges"
+  # intensity_floor: 0.05    # uncomment to zero a faint background haze before masking
+  n_subjects:
+    train: 100               # subjects sampled per split (adjust to your cohort size)
+    val: 5
+
+validation:
+  fit_epochs: 50             # inner epochs to fit held-out subjects' latents against the frozen decoder
+  reconstruct: true
+  latent_analysis:           # sanity-check that latents encode the temporal axis
+    - {type: pls, target: GA_MRI, n_components: 5}
+
+atlas:
+  enabled: true
+  recipe: ../atlas/example.yaml
+
+logging:
+  enabled: false             # set true and add wandb_entity / project to stream to Weights & Biases

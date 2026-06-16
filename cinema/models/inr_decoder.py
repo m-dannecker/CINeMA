@@ -246,6 +246,7 @@ def mask_by_largest_component(
     *,
     bg_label_str: str = "BG",
     halo_sigma: float = 1.0,
+    open_radius: int = 0,
 ) -> torch.Tensor:
     """Return a smooth float mask isolating the largest connected component.
 
@@ -253,6 +254,14 @@ def mask_by_largest_component(
     central connected blob, then smooths the result with a Gaussian and
     thresholds it back to ``{0, 1}``. Used by atlas/evaluator to suppress
     spurious far-from-brain reconstructions.
+
+    ``open_radius`` (> 0) applies a morphological *opening* before connected-
+    component labelling: the foreground is eroded by ``open_radius`` voxels (which
+    severs thin "bridges" between the brain and bridged hallucinations), the
+    central component is selected, then dilated back. This is the lever for
+    "hallucinations survive masking because a thin bridge keeps them in the same
+    connected component"; raising ``halo_sigma`` does NOT help there (it only
+    dilates/smooths the final mask).
     """
     if bg_label_str in label_names:
         bg_label = label_names.index(bg_label_str)
@@ -264,7 +273,15 @@ def mask_by_largest_component(
     if mask.sum() == 0:
         return torch.zeros_like(seg_hard, dtype=torch.float32)
 
-    labeled, _ = scipy_label(mask)
+    # Opening: erode to disconnect thin bridges before labelling. Fall back to
+    # the un-eroded mask if erosion would wipe the foreground entirely.
+    core = mask
+    if open_radius > 0:
+        eroded = ndi.binary_erosion(mask, iterations=int(open_radius))
+        if eroded.any():
+            core = eroded.astype(np.uint8)
+
+    labeled, _ = scipy_label(core)
     shp = np.array(mask.shape)
     cp = shp // 2
     ps = np.maximum((shp * 0.1 // 2).astype(int), 1)
@@ -278,7 +295,12 @@ def mask_by_largest_component(
         return torch.zeros_like(seg_hard, dtype=torch.float32)
     majority = int(np.bincount(patch).argmax())
 
-    mask = (mask & (labeled == majority)).astype(np.float32)
+    selected = labeled == majority
+    if open_radius > 0:
+        # Dilate the selected core back to ~original size, intersect with the
+        # foreground — recovers the brain boundary without the severed bridge.
+        selected = ndi.binary_dilation(selected, iterations=int(open_radius))
+    mask = (mask & selected).astype(np.float32)
     smooth = (ndi.gaussian_filter(mask, sigma=halo_sigma) > 1e-3).astype(np.float32)
     return torch.from_numpy(smooth).to(seg_hard.device)
 

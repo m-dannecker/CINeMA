@@ -315,6 +315,28 @@ class TrainingConfig:
     n_subjects: NSubjectsConfig
     save_checkpoint_every: Optional[int] = None
     mask_reconstruction: bool = True
+    # Segmentation-masking knobs (see cinema/data.py `_add_background_halo` and
+    # cinema/models/inr_decoder.py `mask_by_largest_component`):
+    # - `mask_halo_width`: width (Gaussian sigma, voxels) of the background ring
+    #   painted around the foreground at *training* time. Wider = thicker
+    #   "outside-brain = background" supervision, which yields a cleaner boundary
+    #   and fewer foreground bridges. Bump it for lower-quality segmentations.
+    # - `mask_open_radius`: erosion radius (voxels) of a morphological *opening*
+    #   applied before largest-connected-component selection at *inference* time.
+    #   Severs thin foreground bridges so bridged hallucinations get dropped.
+    #   0 = off (no opening). This is the lever for "bridges survive masking".
+    # (The final inference mask is also lightly Gaussian-smoothed at a fixed
+    #  sigma of 1.0 voxel inside `mask_by_largest_component` — cosmetic only, not
+    #  exposed here because it does nothing for bridges.)
+    # - `intensity_floor`: at inference, voxels whose brightest intensity channel
+    #   is below this are zeroed *and* set to background in the seg, before
+    #   largest-component masking. Rounds the faint background haze (~0.02) to
+    #   zero and strips faint hallucinations from the seg so masking catches them.
+    #   Keep below the darkest real tissue (e.g. ~0.05; dark brain is rarely
+    #   < 0.1 for min-max-normalised intensities). 0 = off.
+    mask_halo_width: float = 1.5
+    mask_open_radius: int = 0
+    intensity_floor: float = 0.0
     refresh_epochs: int = 0
 
     @classmethod
@@ -335,6 +357,9 @@ class TrainingConfig:
                 else None
             ),
             mask_reconstruction=bool(d.get("mask_reconstruction", True)),
+            mask_halo_width=float(d.get("mask_halo_width", 1.5)),
+            mask_open_radius=int(d.get("mask_open_radius", 0)),
+            intensity_floor=float(d.get("intensity_floor", 0.0)),
             refresh_epochs=int(d.get("refresh_epochs", 0)),
         )
 
@@ -381,6 +406,59 @@ class ValidationConfig:
 
 
 @dataclass
+class GrowthCurvesConfig:
+    """Tissue-volume growth-curve overlay for atlas validation.
+
+    When ``enabled``, the atlas step measures per-tissue volumes from the
+    *training* segmentations (the same cohort the atlas is regressed from), fits
+    mean +/- SD curves vs the temporal axis, and overlays the generated atlas's
+    own measured volumes — see ``cinema/growth_curves.py``.
+
+    ``group_by`` is an optional column/condition name: if it has few unique
+    values (categorical, e.g. ``ExamType_numeric``) one curve is fit per value,
+    and each atlas combination is routed onto the matching curve. Leave it unset
+    for a single overall curve (the right choice for a continuous sweep such as
+    ``lv_z``, where the atlas variants instead show up as a spread of points).
+    ``group_labels`` maps raw group values to display names
+    (e.g. ``{-1.0: PRE_OP, 1.0: POST_OP}``). ``tissues`` defaults to every
+    non-background entry of the dataset's ``label_names`` plus ``TotalBrain``.
+    """
+
+    enabled: bool = False
+    group_by: Optional[str] = None
+    group_labels: dict = field(default_factory=dict)
+    tissues: Optional[list[str]] = None
+    kernel_sigma: float = 2.0
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> "GrowthCurvesConfig":
+        d = d or {}
+        labels: dict = {}
+        for k, v in (d.get("group_labels") or {}).items():
+            try:
+                labels[float(k)] = str(v)   # align numeric keys with condition values
+            except (TypeError, ValueError):
+                labels[k] = str(v)
+        tissues = d.get("tissues")
+        return cls(
+            enabled=bool(d.get("enabled", False)),
+            group_by=(str(d["group_by"]) if d.get("group_by") else None),
+            group_labels=labels,
+            tissues=[str(t) for t in tissues] if tissues else None,
+            kernel_sigma=float(d.get("kernel_sigma", 2.0)),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "group_by": self.group_by,
+            "group_labels": {str(k): v for k, v in self.group_labels.items()},
+            "tissues": list(self.tissues) if self.tissues else None,
+            "kernel_sigma": self.kernel_sigma,
+        }
+
+
+@dataclass
 class AtlasRecipe:
     """Declarative atlas request: ages × condition combinations, in physical units."""
 
@@ -394,6 +472,7 @@ class AtlasRecipe:
     # ``scan_age``; set it for datasets whose age condition is named otherwise
     # (e.g. ``GA_MRI``). Must be a registered condition.
     temporal_condition: str = "scan_age"
+    growth_curves: GrowthCurvesConfig = field(default_factory=GrowthCurvesConfig)
 
     @classmethod
     def from_dict(cls, d: dict) -> "AtlasRecipe":
@@ -407,6 +486,7 @@ class AtlasRecipe:
             gaussian_span=float(d.get("gaussian_span", 1.0)),
             n_max=int(d.get("n_max", 100)),
             temporal_condition=str(d.get("temporal_condition", "scan_age")),
+            growth_curves=GrowthCurvesConfig.from_dict(d.get("growth_curves")),
         )
 
     def to_dict(self) -> dict:
@@ -418,6 +498,7 @@ class AtlasRecipe:
             "gaussian_span": self.gaussian_span,
             "n_max": self.n_max,
             "temporal_condition": self.temporal_condition,
+            "growth_curves": self.growth_curves.to_dict(),
         }
 
 

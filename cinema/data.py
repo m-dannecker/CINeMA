@@ -38,6 +38,24 @@ from .config import (
 )
 
 
+def read_subjects_table(path: Union[str, Path]) -> pd.DataFrame:
+    """Read the subjects table, sniffing the delimiter from its first line.
+
+    Supports tab- (legacy ``.tsv``), comma- and semicolon-separated content
+    (the latter is common for Excel exports in European locales),
+    regardless of the file's extension.
+    """
+    with open(path, "r") as f:
+        header = f.readline()
+    if "\t" in header:
+        sep = "\t"
+    elif ";" in header:
+        sep = ";"
+    else:
+        sep = ","
+    return pd.read_csv(path, sep=sep)
+
+
 def _normalize_intensities(values: np.ndarray, norm_type: str) -> np.ndarray:
     if values.shape[-1] == 0:
         return values
@@ -71,6 +89,51 @@ def _squeeze_4d(nii: nib.Nifti1Image) -> nib.Nifti1Image:
     return nii
 
 
+def _resolve_bg_label(label_names: list[str], bg_label_str: str = "BG") -> int:
+    """Index of the label the halo paints as background: the explicit ``BG``
+    class if the scheme defines one, else label 0 (the conventional bg slot)."""
+    return label_names.index(bg_label_str) if bg_label_str in label_names else 0
+
+
+def _warn_if_halo_bg_untrained(dataset_spec) -> None:
+    """Loudly warn if the halo's background class carries zero loss weight.
+
+    The halo paints a background ring around the brain so the decoder learns
+    "outside brain = background", which is what makes the seg-based mask produce
+    a clean boundary. If that class has ``class_weight == 0`` the ring voxels
+    contribute NO segmentation loss, so the decoder never learns to emit
+    background and predicts a foreground class everywhere outside — silently
+    breaking the mask. This catches that misconfiguration before a wasted run.
+    """
+    label_names = dataset_spec.label_names
+    weights = dataset_spec.class_weights
+    if not label_names or weights is None:
+        return
+    bg = _resolve_bg_label(label_names)
+    if bg < len(weights) and float(weights[bg]) == 0.0:
+        import warnings
+
+        name = label_names[bg]
+        bar = "=" * 74
+        warnings.warn(
+            f"\n{bar}\n"
+            f"[CINeMA] Segmentation masking (halo) is ENABLED, but its background "
+            f"class '{name}' (label {bg}) has class_weight=0.0.\n"
+            f"The halo paints a background ring around the brain to teach the "
+            f"decoder 'outside brain = background', but a zero weight means those "
+            f"voxels contribute NO segmentation loss. The decoder then never "
+            f"learns to emit background and predicts a foreground class (e.g. CSF) "
+            f"everywhere outside the brain — silently breaking the seg-based "
+            f"reconstruction mask.\n"
+            f"FIX: give label {bg} ('{name}') a non-zero class_weight, or add a "
+            f"dedicated 'BG' class with non-zero weight (cf. "
+            f"configs/datasets/dhcp_neo.yaml).\n"
+            f"{bar}",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def _add_background_halo(
     seg: np.ndarray,
     label_names: list[str],
@@ -97,7 +160,7 @@ def _add_background_halo(
     fg = seg > 0
     dilated = ndi.gaussian_filter(fg.astype(np.float32), sigma=halo_width) > 0.001
     ring = dilated & ~fg
-    bg_label = label_names.index(bg_label_str) if bg_label_str in label_names else 0
+    bg_label = _resolve_bg_label(label_names, bg_label_str)
     out = seg.copy()
     out[ring] = bg_label
     return out, dilated
@@ -137,6 +200,7 @@ class Data(Dataset):
         df_loaded: Optional[pd.DataFrame] = None,
         skip_segmentation: bool = False,
         mask_intensities_by_segmentation: bool = False,
+        mask_halo_width: float = 1.5,
         augmentation: Optional[DataAugmentationConfig] = None,
         output_dir: Optional[Union[str, Path]] = None,
     ):
@@ -149,6 +213,9 @@ class Data(Dataset):
         self.subject_ids = subject_ids
         self.skip_segmentation = skip_segmentation
         self.mask_intensities_by_segmentation = mask_intensities_by_segmentation
+        self.mask_halo_width = float(mask_halo_width)
+        if self.mask_intensities_by_segmentation and not skip_segmentation:
+            _warn_if_halo_bg_untrained(dataset_spec)
         self.output_dir = Path(output_dir) if output_dir is not None else None
 
         self._intensity_modalities = list(dataset_spec.intensity_modalities)
@@ -161,7 +228,7 @@ class Data(Dataset):
         self._world_bbox = np.asarray(dataset_spec.world_bbox, dtype=np.float64)
 
         self.tsv_file = (
-            pd.read_csv(tsv_file, sep="\t")
+            read_subjects_table(tsv_file)
             if isinstance(tsv_file, (str, Path))
             else tsv_file
         )
@@ -384,7 +451,10 @@ class Data(Dataset):
                 and self.dataset_spec.label_names is not None
             ):
                 # Add the background halo and sample foreground + ring.
-                seg, mask = _add_background_halo(seg, self.dataset_spec.label_names)
+                seg, mask = _add_background_halo(
+                    seg, self.dataset_spec.label_names,
+                    halo_width=self.mask_halo_width,
+                )
                 modalities_data[self._seg_modality] = seg
             else:
                 mask = seg > 0
