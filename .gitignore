@@ -8,7 +8,6 @@ data_loading/__pycache__/
 wandb/
 tmp/
 output/
-configs/
 .DS_Store
 .vscode/
 
